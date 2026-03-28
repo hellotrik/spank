@@ -321,10 +321,6 @@ func updateKeyHold(s *keyboardHoldState, now time.Time, downFn func() (bool, err
 	return false, time.Time{}, 0
 }
 
-func updateSpaceKeyHold(s *keyboardHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
-	return updateKeyHold(s, now, spaceKeyDown, "Space")
-}
-
 func updateEnterKeyHold(s *keyboardHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
 	return updateKeyHold(s, now, enterKeyDown, "Enter")
 }
@@ -345,7 +341,7 @@ Use --lizard for lizard-style escalation like --sexy.
 
 Use --sward for the sward sound pack.
 
-Use --keyboard to also listen for Space and Enter key hold/release (independent of --mouse; both can be toggled in the TUI).`,
+Use --keyboard to also listen for Enter key hold/release (independent of --mouse; both can be toggled in the TUI).`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -377,7 +373,7 @@ Use --keyboard to also listen for Space and Enter key hold/release (independent 
 	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by hold duration (longer hold = louder)")
 	cmd.Flags().Float64Var(&speedRatio, "speed", defaultSpeedRatio, "Playback speed multiplier (0.5 = half speed, 2.0 = double speed)")
 	cmd.Flags().BoolVar(&listenMouse, "mouse", true, "Listen to left mouse button hold/release")
-	cmd.Flags().BoolVar(&listenKeyboard, "keyboard", false, "Listen to Space/Enter key hold/release (global; may overlap TUI keys)")
+	cmd.Flags().BoolVar(&listenKeyboard, "keyboard", false, "Listen to Enter key hold/release (global; may overlap TUI keys)")
 
 	// Cobra shows a "run from cmd.exe" splash when the parent is explorer.exe on Windows.
 	// spank is intended to run normally when double-clicked (TUI / console).

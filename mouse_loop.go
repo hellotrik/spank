@@ -15,7 +15,6 @@ type mouseLoopRuntime struct {
 	Tracker            *slapTracker
 	SpeakerInit        bool
 	MouseState         mouseHoldState
-	KeyboardSpaceState keyboardHoldState
 	KeyboardEnterState keyboardHoldState
 	LastYell           time.Time
 }
@@ -29,7 +28,7 @@ func (rt *mouseLoopRuntime) switchToPack(pack *soundPack) {
 	rt.LastYell = time.Time{}
 }
 
-// tick polls input; at most one release event per tick (mouse first, then Space, then Enter).
+// tick polls input; at most one release event per tick (mouse first, then Enter if --keyboard).
 func (rt *mouseLoopRuntime) tick(now time.Time) []string {
 	inputListenMu.RLock()
 	mOn := listenMouse
@@ -58,9 +57,6 @@ func (rt *mouseLoopRuntime) tickMouse(now time.Time) []string {
 }
 
 func (rt *mouseLoopRuntime) tickKeyboard(now time.Time) []string {
-	if released, relTime, holdDur := updateSpaceKeyHold(&rt.KeyboardSpaceState, now); released {
-		return rt.tryInputRelease(now, relTime, holdDur, "keyboard")
-	}
 	if released, relTime, holdDur := updateEnterKeyHold(&rt.KeyboardEnterState, now); released {
 		return rt.tryInputRelease(now, relTime, holdDur, "keyboard")
 	}

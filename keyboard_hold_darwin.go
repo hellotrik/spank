@@ -10,7 +10,6 @@ import (
 
 // Virtual key codes (Events.h).
 const (
-	kVKSpace       uint16 = 0x31
 	kVKReturn      uint16 = 0x24 // main keyboard Return / Enter
 	kVKKeypadEnter uint16 = 0x4C // keypad Enter
 )
@@ -33,14 +32,6 @@ func ensureKeyboardCG() error {
 		purego.RegisterLibFunc(&cgKeyState, lib, "CGEventSourceKeyState")
 	})
 	return keyboardCGInitErr
-}
-
-// spaceKeyDown reports whether Space is physically down (HID via CoreGraphics).
-func spaceKeyDown() (bool, error) {
-	if err := ensureKeyboardCG(); err != nil {
-		return false, err
-	}
-	return cgKeyState(kCGEventSourceStateHIDSystemState, kVKSpace) != 0, nil
 }
 
 // enterKeyDown reports whether Return or keypad Enter is physically down.

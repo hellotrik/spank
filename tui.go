@@ -747,7 +747,7 @@ func (m *tuiModel) viewMain() string {
 	if lipgloss.Width(toolbar) > iw {
 		toolbar = ansi.Truncate(toolbar, iw, "…")
 	}
-	meta := m.mainMouseDebugPrefix() + "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Space/Enter" + scrollHint
+	meta := m.mainMouseDebugPrefix() + "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Enter" + scrollHint
 	if h := strings.TrimSpace(m.hintLine); h != "" {
 		meta = h + " · " + meta
 	}
@@ -804,7 +804,7 @@ func (m *tuiModel) viewSettings() string {
 		kStr = "on"
 	}
 	lineLM := fmt.Sprintf("%sListen mouse      %s   ←/→", mark(tuiSetListenMouse), mStr)
-	lineLK := fmt.Sprintf("%sListen keyboard   %s   Space/Enter · ←/→", mark(tuiSetListenKeyboard), kStr)
+	lineLK := fmt.Sprintf("%sListen keyboard   %s   Enter · ←/→", mark(tuiSetListenKeyboard), kStr)
 
 	linePack = ansi.Truncate(linePack, iw, "…")
 	lineCD = ansi.Truncate(lineCD, iw, "…")
