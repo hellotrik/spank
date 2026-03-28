@@ -1,6 +1,5 @@
-// spank detects slaps/hits on the laptop and plays audio responses.
-// It reads the Apple Silicon accelerometer directly via IOKit HID —
-// no separate sensor daemon required. Needs sudo.
+// spank plays audio when you release the left mouse button (hold duration
+// maps to volume when using --volume-scaling). macOS and Windows only.
 package main
 
 import (
@@ -45,20 +44,18 @@ var haloAudio embed.FS
 var lizardAudio embed.FS
 
 var (
-	sexyMode         bool
-	haloMode         bool
-	lizardMode       bool
-	customPath       string
-	customFiles      []string
-	fastMode         bool
-	minAmplitude     float64
-	cooldownMs       int
-	stdioMode        bool
-	volumeScaling    bool
-	paused           bool
-	pausedMu         sync.RWMutex
-	speedRatio       float64
-	mouseHoldMonitor bool
+	sexyMode      bool
+	haloMode      bool
+	lizardMode    bool
+	customPath    string
+	customFiles   []string
+	fastMode      bool
+	cooldownMs    int
+	stdioMode     bool
+	volumeScaling bool
+	paused        bool
+	pausedMu      sync.RWMutex
+	speedRatio    float64
 )
 
 // mouseHoldLibErrOnce logs a single failure from CoreGraphics mouse APIs.
@@ -90,42 +87,25 @@ const (
 	// defaultSpeedRatio is the default playback speed (1.0 = normal).
 	defaultSpeedRatio = 1.0
 
-	// defaultSensorPollInterval is how often we check for new accelerometer data.
-	defaultSensorPollInterval = 10 * time.Millisecond
-
-	// defaultMaxSampleBatch caps the number of accelerometer samples processed
-	// per tick to avoid falling behind.
-	defaultMaxSampleBatch = 200
-
-	// sensorStartupDelay gives the sensor time to start producing data.
-	sensorStartupDelay = 100 * time.Millisecond
+	// defaultMousePollInterval is how often we sample the left mouse button.
+	defaultMousePollInterval = 10 * time.Millisecond
 )
 
 type runtimeTuning struct {
-	minAmplitude float64
 	cooldown     time.Duration
 	pollInterval time.Duration
-	maxBatch     int
 }
 
 func defaultTuning() runtimeTuning {
 	return runtimeTuning{
-		minAmplitude: defaultMinAmplitude,
 		cooldown:     time.Duration(defaultCooldownMs) * time.Millisecond,
-		pollInterval: defaultSensorPollInterval,
-		maxBatch:     defaultMaxSampleBatch,
+		pollInterval: defaultMousePollInterval,
 	}
 }
 
 func applyFastOverlay(base runtimeTuning) runtimeTuning {
 	base.pollInterval = 4 * time.Millisecond
 	base.cooldown = 350 * time.Millisecond
-	if base.minAmplitude > 0.18 {
-		base.minAmplitude = 0.18
-	}
-	if base.maxBatch < 320 {
-		base.maxBatch = 320
-	}
 	return base
 }
 
@@ -275,13 +255,10 @@ func emitMouseRelease(at time.Time, d time.Duration, played bool, reason string,
 }
 
 func updateMouseLeftHold(s *mouseHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
-	if !mouseHoldMonitor {
-		return false, time.Time{}, 0
-	}
 	down, err := leftMouseButtonDown()
 	if err != nil {
 		mouseHoldLibErrOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "spank: --mouse-hold: %v\n", err)
+			fmt.Fprintf(os.Stderr, "spank: mouse: %v\n", err)
 		})
 		return false, time.Time{}, 0
 	}
@@ -299,32 +276,21 @@ func updateMouseLeftHold(s *mouseHoldState, now time.Time) (released bool, relTi
 func main() {
 	cmd := &cobra.Command{
 		Use:   "spank",
-		Short: "Yells 'ow!' when you slap the laptop",
-		Long: `spank reads the Apple Silicon accelerometer directly via IOKit HID
-and plays audio responses when a slap or hit is detected.
+		Short: "Plays audio when you release the left mouse button",
+		Long: `spank watches the left mouse button; when you release it, it plays a clip
+from the selected sound pack (hold duration affects volume with --volume-scaling).
 
-On macOS: requires sudo (IOKit HID accelerometer). Windows builds have no
-accelerometer; use --mouse-hold only (GetAsyncKeyState / left button).
+Use --sexy for escalation: the more often you trigger within a window, the more
+intense the sounds become.
 
-Use --sexy for a different experience. In sexy mode, the more you slap
-within a minute, the more intense the sounds become.
+Use --halo for random Halo clips on each release.
 
-Use --halo to play random audio clips from Halo soundtracks on each slap.
-
-Use --lizard for lizard mode. Like sexy mode, the more you slap
-within a minute, the more intense the sounds become.
-
-Use --mouse-hold to treat left mouse button release like a trigger: logs hold
-duration and plays the same sound pack (shared cooldown with accelerometer slaps on macOS).`,
+Use --lizard for lizard-style escalation like --sexy.`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
 			if fastMode {
 				tuning = applyFastOverlay(tuning)
-			}
-			// Explicit flags override fast preset defaults
-			if cmd.Flags().Changed("min-amplitude") {
-				tuning.minAmplitude = minAmplitude
 			}
 			if cmd.Flags().Changed("cooldown") {
 				tuning.cooldown = time.Duration(cooldownMs) * time.Millisecond
@@ -338,14 +304,12 @@ duration and plays the same sound pack (shared cooldown with accelerometer slaps
 	cmd.Flags().BoolVarP(&haloMode, "halo", "H", false, "Enable halo mode")
 	cmd.Flags().BoolVarP(&lizardMode, "lizard", "l", false, "Enable lizard mode (escalating intensity)")
 	cmd.Flags().StringVarP(&customPath, "custom", "c", "", "Path to custom MP3 audio directory")
-	cmd.Flags().BoolVar(&fastMode, "fast", false, "Enable faster detection tuning (shorter cooldown, higher sensitivity)")
+	cmd.Flags().BoolVar(&fastMode, "fast", false, "Shorter mouse poll interval and cooldown")
 	cmd.Flags().StringSliceVar(&customFiles, "custom-files", nil, "Comma-separated list of custom MP3 files")
-	cmd.Flags().Float64Var(&minAmplitude, "min-amplitude", defaultMinAmplitude, "Minimum amplitude threshold (0.0-1.0, lower = more sensitive)")
 	cmd.Flags().IntVar(&cooldownMs, "cooldown", defaultCooldownMs, "Cooldown between responses in milliseconds")
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
-	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by slap amplitude (harder hits = louder)")
+	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by hold duration (longer hold = louder)")
 	cmd.Flags().Float64Var(&speedRatio, "speed", defaultSpeedRatio, "Playback speed multiplier (0.5 = half speed, 2.0 = double speed)")
-	cmd.Flags().BoolVar(&mouseHoldMonitor, "mouse-hold", false, "On left button release, log hold duration and play audio (same pack/cooldown as slaps)")
 
 	if err := fang.Execute(context.Background(), cmd); err != nil {
 		os.Exit(1)
@@ -370,9 +334,6 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 		return fmt.Errorf("--sexy, --halo, --lizard, and --custom/--custom-files are mutually exclusive; pick one")
 	}
 
-	if tuning.minAmplitude < 0 || tuning.minAmplitude > 1 {
-		return fmt.Errorf("--min-amplitude must be between 0.0 and 1.0")
-	}
 	if tuning.cooldown <= 0 {
 		return fmt.Errorf("--cooldown must be greater than 0")
 	}
@@ -426,9 +387,9 @@ var (
 // audioJob queues work for a single goroutine so oto/speaker/mixer are never
 // used concurrently (avoids hangs on Windows); callers stay non-blocking.
 type audioJob struct {
-	pack         *soundPack
-	path         string
-	amplitude    float64
+	pack        *soundPack
+	path        string
+	amplitude   float64
 	speakerInit *bool
 }
 
@@ -556,10 +517,9 @@ func playAudioSync(pack *soundPack, path string, amplitude float64, speakerInit 
 
 // stdinCommand represents a command received via stdin
 type stdinCommand struct {
-	Cmd       string  `json:"cmd"`
-	Amplitude float64 `json:"amplitude,omitempty"`
-	Cooldown  int     `json:"cooldown,omitempty"`
-	Speed     float64 `json:"speed,omitempty"`
+	Cmd      string  `json:"cmd"`
+	Cooldown int     `json:"cooldown,omitempty"`
+	Speed    float64 `json:"speed,omitempty"`
 }
 
 // readStdinCommands reads JSON commands from stdin for live control
@@ -601,9 +561,6 @@ func processCommands(r io.Reader, w io.Writer) {
 				fmt.Fprintln(w, `{"status":"resumed"}`)
 			}
 		case "set":
-			if cmd.Amplitude > 0 && cmd.Amplitude <= 1 {
-				minAmplitude = cmd.Amplitude
-			}
 			if cmd.Cooldown > 0 {
 				cooldownMs = cmd.Cooldown
 			}
@@ -611,7 +568,7 @@ func processCommands(r io.Reader, w io.Writer) {
 				speedRatio = cmd.Speed
 			}
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"settings_updated","amplitude":%.4f,"cooldown":%d,"speed":%.2f}%s`, minAmplitude, cooldownMs, speedRatio, "\n")
+				fmt.Fprintf(w, `{"status":"settings_updated","cooldown":%d,"speed":%.2f}%s`, cooldownMs, speedRatio, "\n")
 			}
 		case "volume-scaling":
 			volumeScaling = !volumeScaling
@@ -623,7 +580,7 @@ func processCommands(r io.Reader, w io.Writer) {
 			isPaused := paused
 			pausedMu.RUnlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"ok","paused":%t,"amplitude":%.4f,"cooldown":%d,"volume_scaling":%t,"speed":%.2f}%s`, isPaused, minAmplitude, cooldownMs, volumeScaling, speedRatio, "\n")
+				fmt.Fprintf(w, `{"status":"ok","paused":%t,"cooldown":%d,"volume_scaling":%t,"speed":%.2f}%s`, isPaused, cooldownMs, volumeScaling, speedRatio, "\n")
 			}
 		default:
 			if stdioMode {

@@ -11,11 +11,10 @@ buildGoModule.override { go = go_1_26; } {
 
   ldflags = [ "-s" "-w" ];
 
-  # Tests require Apple Silicon accelerometer hardware
   doCheck = false;
 
   meta = {
-    description = "Yells 'ow!' when you slap the laptop";
+    description = "Plays audio on left mouse button release";
     homepage = "https://github.com/taigrr/spank";
     license = lib.licenses.mit;
     platforms = [ "aarch64-darwin" ];
