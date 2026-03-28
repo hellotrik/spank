@@ -21,12 +21,23 @@ const (
 	tuiEventHeight   = 10
 	tuiEventStoreMax = 400
 	tuiMaxInnerW     = 100
-	tuiMinInnerW     = 40
-	tuiWheelLines    = 3
-	tuiPgStep        = 5
+	// Below this inner width, footer uses compact P/R/Q labels so row fits without truncation.
+	tuiFooterFullMinW = 36
+	tuiWheelLines     = 3
+	tuiPgStep         = 5
+
+	// Rounded border (1 col) + box horizontal Padding(0,1) (1 col) before inner text.
+	tuiInnerLeftCol = 2
 
 	tuiScreenMain int = iota
 	tuiScreenSettings
+)
+
+const (
+	tuiToolbarHoverNone   = -1
+	tuiToolbarHoverPause  = 0
+	tuiToolbarHoverResume = 1
+	tuiToolbarHoverQuit   = 2
 )
 
 const (
@@ -64,19 +75,31 @@ type tuiModel struct {
 
 	screen      int // tuiScreenMain or tuiScreenSettings
 	settingsSel int // tuiSetCooldown, tuiSetSpeed, tuiSetVolume
+
+	// Last cell from tea.MouseMsg (0-based); for on-screen debug overlay.
+	mouseX, mouseY int
+	mouseSeen      bool
+
+	// Which toolbar segment is under the pointer (tuiToolbarHover*); main only.
+	toolbarHover int
+
+	// Row index of the P/R/Q line from the last footerButtonRow() scan (0-based); -1 until known.
+	lastToolbarRow int
 }
 
 func newTuiModel(rt *mouseLoopRuntime, packName, tuningLabel string, poll time.Duration, hintLine string) *tuiModel {
 	return &tuiModel{
-		rt:           rt,
-		packName:     packName,
-		tuningLabel:  tuningLabel,
-		pollInterval: poll,
-		termW:        80,
-		termH:        24,
-		hintLine:     hintLine,
-		screen:       tuiScreenMain,
-		settingsSel:  tuiSetPack,
+		rt:             rt,
+		packName:       packName,
+		tuningLabel:    tuningLabel,
+		pollInterval:   poll,
+		termW:          80,
+		termH:          24,
+		hintLine:       hintLine,
+		screen:         tuiScreenMain,
+		settingsSel:    tuiSetPack,
+		toolbarHover:   tuiToolbarHoverNone,
+		lastToolbarRow: -1,
 	}
 }
 
@@ -242,9 +265,11 @@ func (m *tuiModel) pushEvent(line string) {
 }
 
 func (m *tuiModel) innerWidth() int {
+	// Must track real terminal width: forcing a minimum wider than termW-4 breaks
+	// mouse hit-testing and ansi.Truncate vs actual columns when the window is narrow.
 	w := m.termW - 4
-	if w < tuiMinInnerW {
-		w = tuiMinInnerW
+	if w < 1 {
+		w = 1
 	}
 	if w > tuiMaxInnerW {
 		w = tuiMaxInnerW
@@ -253,12 +278,12 @@ func (m *tuiModel) innerWidth() int {
 }
 
 // Main panel layout: bubbletea MouseMsg Y is 0-based (top line of terminal = 0).
-// viewMain: top border, title, tuiEventHeight event lines, footer buttons, meta, bottom border.
+// viewMain: top border, Pause/Resume/Quit row, title, tuiEventHeight event lines, meta, bottom border.
 func (m *tuiModel) layoutMainRows0Based() (titleY, eventLastY, footerBtnY, innerLastY int) {
-	titleY = 1
-	eventLastY = titleY + tuiEventHeight // last event row
-	footerBtnY = eventLastY + 1
-	innerLastY = footerBtnY + 1
+	footerBtnY = 1
+	titleY = 2
+	eventLastY = titleY + tuiEventHeight // last event row (10 lines after title)
+	innerLastY = eventLastY + 1
 	return titleY, eventLastY, footerBtnY, innerLastY
 }
 
@@ -287,25 +312,120 @@ func (m *tuiModel) scrollWheel(delta int) {
 	m.clampScroll()
 }
 
-func (m *tuiModel) handleMainFooterClick(x int) tea.Cmd {
-	tw := m.termW
-	if tw < 3 {
-		tw = max(3, m.innerWidth()+4)
+func footerButtonLabels(compact bool) [3]string {
+	if compact {
+		return [3]string{" P ", " R ", " Q "}
 	}
-	// Full-width thirds: X is 0-based terminal column (same as bubbletea MouseMsg).
-	f := float64(x) / float64(tw)
+	return [3]string{" Pause ", " Resume ", " Quit "}
+}
+
+// footerButtonSegments must match viewMain toolbar rendering (widths drive hit-testing).
+func (m *tuiModel) footerButtonSegments() (left, mid, right string) {
+	st := lipgloss.NewStyle().Reverse(true).Padding(0, 1)
+	labels := footerButtonLabels(m.innerWidth() < tuiFooterFullMinW)
+	return st.Render(labels[0]), st.Render(labels[1]), st.Render(labels[2])
+}
+
+// renderToolbar draws Pause/Resume/Quit with stronger reverse (bold) on the hovered segment.
+func (m *tuiModel) renderToolbar() string {
+	iw := m.innerWidth()
+	compact := iw < tuiFooterFullMinW
+	labels := footerButtonLabels(compact)
+	base := lipgloss.NewStyle().Reverse(true).Padding(0, 1)
+	hi := lipgloss.NewStyle().Reverse(true).Bold(true).Padding(0, 1)
+	parts := make([]string, 3)
+	for i := 0; i < 3; i++ {
+		st := base
+		if m.toolbarHover == i {
+			st = hi
+		}
+		parts[i] = st.Render(labels[i])
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts[0], " ", parts[1], " ", parts[2])
+}
+
+func (m *tuiModel) toolbarHitIndex(x int) int {
+	left, mid, right := m.footerButtonSegments()
+	w1, w2, w3 := lipgloss.Width(left), lipgloss.Width(mid), lipgloss.Width(right)
+	const gap = 1
+	ix := x - tuiInnerLeftCol
+	if ix < 0 {
+		return tuiToolbarHoverNone
+	}
 	switch {
-	case f < 1.0/3:
+	case ix < w1:
+		return tuiToolbarHoverPause
+	case ix < w1+gap:
+		return tuiToolbarHoverNone
+	case ix < w1+gap+w2:
+		return tuiToolbarHoverResume
+	case ix < w1+gap+w2+gap:
+		return tuiToolbarHoverNone
+	case ix < w1+gap+w2+gap+w3:
+		return tuiToolbarHoverQuit
+	default:
+		return tuiToolbarHoverNone
+	}
+}
+
+func (m *tuiModel) syncToolbarHover(msg tea.MouseMsg) {
+	fr := m.footerButtonRow()
+	m.lastToolbarRow = fr
+	if msg.Y != fr {
+		m.toolbarHover = tuiToolbarHoverNone
+		return
+	}
+	m.toolbarHover = m.toolbarHitIndex(msg.X)
+}
+
+// mainMouseDebugPrefix is prepended to the meta line: live ptr + toolbar row + P/R/Q column spans (half-open).
+func (m *tuiModel) mainMouseDebugPrefix() string {
+	if !m.mouseSeen {
+		return ""
+	}
+	btnY := m.lastToolbarRow
+	if btnY < 0 {
+		_, _, btnY, _ = m.layoutMainRows0Based()
+	}
+	left, mid, right := m.footerButtonSegments()
+	w1, w2, w3 := lipgloss.Width(left), lipgloss.Width(mid), lipgloss.Width(right)
+	const gap = 1
+	c := tuiInnerLeftCol
+	pLo, pHi := c, c+w1
+	rLo, rHi := c+w1+gap, c+w1+gap+w2
+	qLo, qHi := c+w1+gap+w2+gap, c+w1+gap+w2+gap+w3
+	return fmt.Sprintf("ptr(%d,%d) row=%d P[%d,%d) R[%d,%d) Q[%d,%d) · ",
+		m.mouseX, m.mouseY, btnY, pLo, pHi, rLo, rHi, qLo, qHi)
+}
+
+// footerButtonRow finds the terminal row (0-based) of the Pause/Resume/Quit toolbar line by scanning
+// the current view so title wrapping cannot desync fixed row math.
+func (m *tuiModel) footerButtonRow() int {
+	view := strings.ReplaceAll(m.View(), "\r", "")
+	for i, line := range strings.Split(view, "\n") {
+		plain := ansi.Strip(line)
+		if (strings.Contains(plain, "Pause") && strings.Contains(plain, "Resume")) ||
+			(strings.Contains(plain, " P ") && strings.Contains(plain, " R ")) {
+			return i
+		}
+	}
+	_, _, fb, _ := m.layoutMainRows0Based()
+	return fb
+}
+
+func (m *tuiModel) handleMainFooterClick(x int) tea.Cmd {
+	switch m.toolbarHitIndex(x) {
+	case tuiToolbarHoverPause:
 		pausedMu.Lock()
 		paused = true
 		pausedMu.Unlock()
 		logFileLine("tui: paused (mouse)")
-	case f < 2.0/3:
+	case tuiToolbarHoverResume:
 		pausedMu.Lock()
 		paused = false
 		pausedMu.Unlock()
 		logFileLine("tui: resumed (mouse)")
-	default:
+	case tuiToolbarHoverQuit:
 		return tea.Quit
 	}
 	return nil
@@ -379,7 +499,7 @@ func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *tuiModel) updateMainMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	titleY, _, footerBtnY, innerLastY := m.layoutMainRows0Based()
+	titleY, _, _, innerLastY := m.layoutMainRows0Based()
 	y := msg.Y
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
@@ -402,7 +522,7 @@ func (m *tuiModel) updateMainMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			paused = !paused
 			pausedMu.Unlock()
 			logFileLine("tui: pause toggled (mouse title)")
-		case y == footerBtnY:
+		case m.lastToolbarRow >= 0 && y == m.lastToolbarRow:
 			if cmd := m.handleMainFooterClick(msg.X); cmd != nil {
 				return m, cmd
 			}
@@ -420,6 +540,8 @@ func (m *tuiModel) updateSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "esc", "o":
 		m.screen = tuiScreenMain
+		m.toolbarHover = tuiToolbarHoverNone
+		m.lastToolbarRow = -1
 		return m, nil
 	case "up", "k":
 		m.settingsSel = (m.settingsSel + 5) % 6
@@ -479,6 +601,8 @@ func (m *tuiModel) updateMainKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		m.screen = tuiScreenSettings
 		m.settingsSel = tuiSetPack
+		m.toolbarHover = tuiToolbarHoverNone
+		m.lastToolbarRow = -1
 		return m, nil
 	case "p":
 		pausedMu.Lock()
@@ -549,9 +673,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.tickCmd()
 
 	case tea.MouseMsg:
+		m.mouseX, m.mouseY = msg.X, msg.Y
+		m.mouseSeen = true
 		if m.screen == tuiScreenSettings {
+			m.toolbarHover = tuiToolbarHoverNone
+			m.lastToolbarRow = -1
 			return m.updateSettingsMouse(msg)
 		}
+		m.syncToolbarHover(msg)
 		return m.updateMainMouse(msg)
 
 	case tea.KeyMsg:
@@ -614,16 +743,15 @@ func (m *tuiModel) viewMain() string {
 	if mx := m.maxScrollBack(); mx > 0 {
 		scrollHint = fmt.Sprintf(" scroll %d/%d ", m.scrollBack, mx)
 	}
-	footerLeft := lipgloss.NewStyle().Reverse(true).Padding(0, 1).Render(" Pause ")
-	footerMid := lipgloss.NewStyle().Reverse(true).Padding(0, 1).Render(" Resume ")
-	footerRight := lipgloss.NewStyle().Reverse(true).Padding(0, 1).Render(" Quit ")
-	footer := lipgloss.JoinHorizontal(lipgloss.Top, footerLeft, " ", footerMid, " ", footerRight)
-	footer = ansi.Truncate(footer, iw, "…")
-	meta := "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Space/Enter" + scrollHint
+	toolbar := m.renderToolbar()
+	if lipgloss.Width(toolbar) > iw {
+		toolbar = ansi.Truncate(toolbar, iw, "…")
+	}
+	meta := m.mainMouseDebugPrefix() + "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Space/Enter" + scrollHint
 	if h := strings.TrimSpace(m.hintLine); h != "" {
 		meta = h + " · " + meta
 	}
-	footerMeta := lipgloss.NewStyle().Faint(true).Render(ansi.Truncate(meta, iw, "…"))
+	metaLine := lipgloss.NewStyle().Faint(true).Render(ansi.Truncate(meta, iw, "…"))
 
 	border := lipgloss.RoundedBorder()
 	box := lipgloss.NewStyle().
@@ -633,10 +761,10 @@ func (m *tuiModel) viewMain() string {
 		Width(iw + 2)
 
 	blocks := []string{
+		toolbar,
 		lipgloss.NewStyle().Bold(true).Render(title),
 		strings.Join(eventLines, "\n"),
-		footer,
-		footerMeta,
+		metaLine,
 	}
 
 	inner := lipgloss.JoinVertical(lipgloss.Left, blocks...)
@@ -686,8 +814,11 @@ func (m *tuiModel) viewSettings() string {
 	lineLK = ansi.Truncate(lineLK, iw, "…")
 
 	title := lipgloss.NewStyle().Bold(true).Render(ansi.Truncate(" Settings · sound/input · esc/o back · q quit ", iw, "…"))
-	hint := lipgloss.NewStyle().Faint(true).Render(ansi.Truncate(
-		"↑↓/tab · ←→ / wheel · space: pack/vol/listen toggle · need M or K on", iw, "…"))
+	hintStr := "↑↓/tab · ←→ / wheel · space: pack/vol/listen toggle · need M or K on"
+	if m.mouseSeen {
+		hintStr = fmt.Sprintf("ptr(%d,%d) · ", m.mouseX, m.mouseY) + hintStr
+	}
+	hint := lipgloss.NewStyle().Faint(true).Render(ansi.Truncate(hintStr, iw, "…"))
 
 	border := lipgloss.RoundedBorder()
 	box := lipgloss.NewStyle().
@@ -736,6 +867,7 @@ func runWindowTUI(ctx context.Context, pack *soundPack, tuning runtimeTuning) er
 	m := newTuiModel(rt, pack.name, presetLabel, tuning.pollInterval, hint)
 	p := tea.NewProgram(m,
 		tea.WithContext(ctx),
+		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 	_, err := p.Run()
