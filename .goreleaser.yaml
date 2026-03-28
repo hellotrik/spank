@@ -3,6 +3,8 @@ version: 2
 before:
   hooks:
     - go mod tidy
+    # Windows PE icon: COFF resource consumed by the linker for GOOS=windows (see rsrc_windows_amd64.syso).
+    - go run github.com/akavel/rsrc@v0.10.2 -ico doc/icon.ico -o rsrc_windows_amd64.syso -arch amd64
 
 builds:
   - env:
