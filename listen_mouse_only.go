@@ -33,7 +33,7 @@ func listenMousePlain(ctx context.Context, pack *soundPack, tuning runtimeTuning
 		presetLabel = "fast"
 	}
 
-	fmt.Printf("spank: left-button release triggers (%s pack, %s tuning); ctrl+c to quit\n", pack.name, presetLabel)
+	fmt.Printf("spank: mouse and/or Space/Enter key release → sound (%s pack, %s tuning); ctrl+c to quit · --mouse/--keyboard\n", pack.name, presetLabel)
 	if runtime.GOOS == "windows" {
 		fmt.Fprintln(os.Stderr, "spank: if cmd title shows “Select”/「选择」or you dragged to select text, Windows pauses this program — press Esc or disable Quick Edit Mode (cmd → Properties → Options).")
 	}

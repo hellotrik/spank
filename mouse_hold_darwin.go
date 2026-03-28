@@ -17,7 +17,8 @@ const (
 var (
 	mouseCGOnce    sync.Once
 	mouseCGInitErr error
-	cgButtonState  func(state, button uint32) bool
+	// CoreGraphics Boolean return is unsigned char.
+	cgButtonState func(state, button uint32) byte
 )
 
 func ensureCoreGraphicsMouse() error {
@@ -39,5 +40,5 @@ func leftMouseButtonDown() (bool, error) {
 	if err := ensureCoreGraphicsMouse(); err != nil {
 		return false, err
 	}
-	return cgButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft), nil
+	return cgButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft) != 0, nil
 }

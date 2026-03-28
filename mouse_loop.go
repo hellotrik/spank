@@ -7,15 +7,17 @@ import (
 	"time"
 )
 
-// mouseLoopRuntime holds per-session mouse + audio state for one listen/TUI run.
+// mouseLoopRuntime holds per-session mouse + keyboard + audio state for one listen/TUI run.
 type mouseLoopRuntime struct {
-	mu          sync.Mutex
-	Pack        *soundPack
-	Tuning      runtimeTuning
-	Tracker     *slapTracker
-	SpeakerInit bool
-	MouseState  mouseHoldState
-	LastYell    time.Time
+	mu                 sync.Mutex
+	Pack               *soundPack
+	Tuning             runtimeTuning
+	Tracker            *slapTracker
+	SpeakerInit        bool
+	MouseState         mouseHoldState
+	KeyboardSpaceState keyboardHoldState
+	KeyboardEnterState keyboardHoldState
+	LastYell           time.Time
 }
 
 // switchToPack replaces the active pack and resets slap state (TUI / future hot-swap).
@@ -27,14 +29,45 @@ func (rt *mouseLoopRuntime) switchToPack(pack *soundPack) {
 	rt.LastYell = time.Time{}
 }
 
-// tick samples the mouse and dispatches one release event if any. Returns
-// non-nil UI lines only in window-TUI mode (plain/stdio print inside dispatch).
+// tick polls input; at most one release event per tick (mouse first, then Space, then Enter).
 func (rt *mouseLoopRuntime) tick(now time.Time) []string {
+	inputListenMu.RLock()
+	mOn := listenMouse
+	kOn := listenKeyboard
+	inputListenMu.RUnlock()
+
+	if mOn {
+		if lines := rt.tickMouse(now); len(lines) > 0 {
+			return lines
+		}
+	}
+	if kOn {
+		if lines := rt.tickKeyboard(now); len(lines) > 0 {
+			return lines
+		}
+	}
+	return nil
+}
+
+func (rt *mouseLoopRuntime) tickMouse(now time.Time) []string {
 	released, relTime, holdDur := updateMouseLeftHold(&rt.MouseState, now)
 	if !released {
 		return nil
 	}
+	return rt.tryInputRelease(now, relTime, holdDur, "mouse")
+}
 
+func (rt *mouseLoopRuntime) tickKeyboard(now time.Time) []string {
+	if released, relTime, holdDur := updateSpaceKeyHold(&rt.KeyboardSpaceState, now); released {
+		return rt.tryInputRelease(now, relTime, holdDur, "keyboard")
+	}
+	if released, relTime, holdDur := updateEnterKeyHold(&rt.KeyboardEnterState, now); released {
+		return rt.tryInputRelease(now, relTime, holdDur, "keyboard")
+	}
+	return nil
+}
+
+func (rt *mouseLoopRuntime) tryInputRelease(now, relTime time.Time, holdDur time.Duration, trigger string) []string {
 	pausedMu.RLock()
 	isPaused := paused
 	pausedMu.RUnlock()
@@ -67,8 +100,8 @@ func (rt *mouseLoopRuntime) tick(now time.Time) []string {
 		pack := rt.Pack
 		rt.mu.Unlock()
 		go playAudio(pack, file, amp, &rt.SpeakerInit)
-		return dispatchMouseRelease(relTime, holdDur, played, reason, num, score, amp, file)
+		return dispatchInputRelease(trigger, relTime, holdDur, played, reason, num, score, amp, file)
 	}
 	rt.mu.Unlock()
-	return dispatchMouseRelease(relTime, holdDur, played, reason, num, score, amp, file)
+	return dispatchInputRelease(trigger, relTime, holdDur, played, reason, num, score, amp, file)
 }

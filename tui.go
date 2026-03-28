@@ -24,7 +24,6 @@ const (
 	tuiMinInnerW     = 40
 	tuiWheelLines    = 3
 	tuiPgStep        = 5
-	leftColsPad      = 3
 
 	tuiScreenMain int = iota
 	tuiScreenSettings
@@ -35,6 +34,8 @@ const (
 	tuiSetCooldown
 	tuiSetSpeed
 	tuiSetVolume
+	tuiSetListenMouse
+	tuiSetListenKeyboard
 )
 
 // Built-in pack order for TUI cycling (must match loadEmbeddedPackByID).
@@ -136,6 +137,34 @@ func soundToggleVolumeScaling() {
 	logFileLine(fmt.Sprintf("tui: volume_scaling=%v", v))
 }
 
+func inputListenSnapshot() (mouseOn, kbOn bool) {
+	inputListenMu.RLock()
+	defer inputListenMu.RUnlock()
+	return listenMouse, listenKeyboard
+}
+
+func setListenMouse(on bool) {
+	inputListenMu.Lock()
+	defer inputListenMu.Unlock()
+	if !on && !listenKeyboard {
+		logFileLine("tui: at least one of mouse or keyboard must stay on")
+		return
+	}
+	listenMouse = on
+	logFileLine(fmt.Sprintf("tui: listen_mouse=%v", on))
+}
+
+func setListenKeyboard(on bool) {
+	inputListenMu.Lock()
+	defer inputListenMu.Unlock()
+	if !on && !listenMouse {
+		logFileLine("tui: at least one of mouse or keyboard must stay on")
+		return
+	}
+	listenKeyboard = on
+	logFileLine(fmt.Sprintf("tui: listen_keyboard=%v", on))
+}
+
 func (m *tuiModel) cyclePack(delta int) {
 	if runtimeCustomPack {
 		logFileLine("tui: pack switch disabled (started with --custom)")
@@ -223,24 +252,27 @@ func (m *tuiModel) innerWidth() int {
 	return w
 }
 
-// Main panel layout (1-based terminal rows).
-func (m *tuiModel) layoutMainRows1Based() (titleY, eventLastY, footerBtnY, innerLastY int) {
-	titleY = 2
-	eventLastY = 2 + tuiEventHeight
+// Main panel layout: bubbletea MouseMsg Y is 0-based (top line of terminal = 0).
+// viewMain: top border, title, tuiEventHeight event lines, footer buttons, meta, bottom border.
+func (m *tuiModel) layoutMainRows0Based() (titleY, eventLastY, footerBtnY, innerLastY int) {
+	titleY = 1
+	eventLastY = titleY + tuiEventHeight // last event row
 	footerBtnY = eventLastY + 1
 	innerLastY = footerBtnY + 1
 	return titleY, eventLastY, footerBtnY, innerLastY
 }
 
-// Settings panel: border, title, pack + 3 value rows, hint.
-func (m *tuiModel) layoutSettingsRows1Based() (titleY, rowPack, rowCD, rowSp, rowVol, hintY int) {
-	titleY = 2
-	rowPack = 3
-	rowCD = 4
-	rowSp = 5
-	rowVol = 6
-	hintY = 7
-	return titleY, rowPack, rowCD, rowSp, rowVol, hintY
+// Settings panel: border, title, pack + sound rows + input rows, hint (same 0-based Y as MouseMsg).
+func (m *tuiModel) layoutSettingsRows0Based() (titleY, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY int) {
+	titleY = 1
+	rowPack = 2
+	rowCD = 3
+	rowSp = 4
+	rowVol = 5
+	rowListenM = 6
+	rowListenK = 7
+	hintY = 8
+	return titleY, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY
 }
 
 func (m *tuiModel) scrollWheel(delta int) {
@@ -255,23 +287,20 @@ func (m *tuiModel) scrollWheel(delta int) {
 	m.clampScroll()
 }
 
-func (m *tuiModel) handleMainFooterClick(x1Based int) tea.Cmd {
-	iw := m.innerWidth()
-	ix := x1Based - leftColsPad
-	if ix < 0 {
-		ix = 0
+func (m *tuiModel) handleMainFooterClick(x int) tea.Cmd {
+	tw := m.termW
+	if tw < 3 {
+		tw = max(3, m.innerWidth()+4)
 	}
-	if ix > iw {
-		ix = iw
-	}
-	third := max(1, iw/3)
+	// Full-width thirds: X is 0-based terminal column (same as bubbletea MouseMsg).
+	f := float64(x) / float64(tw)
 	switch {
-	case ix < third:
+	case f < 1.0/3:
 		pausedMu.Lock()
 		paused = true
 		pausedMu.Unlock()
 		logFileLine("tui: paused (mouse)")
-	case ix < 2*third:
+	case f < 2.0/3:
 		pausedMu.Lock()
 		paused = false
 		pausedMu.Unlock()
@@ -296,11 +325,23 @@ func (m *tuiModel) settingsAdjust(dir int) {
 		} else if dir < 0 {
 			soundSetVolumeScaling(false)
 		}
+	case tuiSetListenMouse:
+		if dir > 0 {
+			setListenMouse(true)
+		} else if dir < 0 {
+			setListenMouse(false)
+		}
+	case tuiSetListenKeyboard:
+		if dir > 0 {
+			setListenKeyboard(true)
+		} else if dir < 0 {
+			setListenKeyboard(false)
+		}
 	}
 }
 
 func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	_, rowPack, rowCD, rowSp, rowVol, hintY := m.layoutSettingsRows1Based()
+	_, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY := m.layoutSettingsRows0Based()
 	y := msg.Y
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
@@ -314,7 +355,7 @@ func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseButtonLeft:
-		if msg.Action != tea.MouseActionPress {
+		if msg.Action != tea.MouseActionPress && msg.Action != tea.MouseActionRelease {
 			return m, nil
 		}
 		switch y {
@@ -326,6 +367,10 @@ func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.settingsSel = tuiSetSpeed
 		case rowVol:
 			m.settingsSel = tuiSetVolume
+		case rowListenM:
+			m.settingsSel = tuiSetListenMouse
+		case rowListenK:
+			m.settingsSel = tuiSetListenKeyboard
 		}
 		return m, nil
 	default:
@@ -334,7 +379,7 @@ func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *tuiModel) updateMainMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	titleY, _, footerBtnY, innerLastY := m.layoutMainRows1Based()
+	titleY, _, footerBtnY, innerLastY := m.layoutMainRows0Based()
 	y := msg.Y
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
@@ -348,7 +393,7 @@ func (m *tuiModel) updateMainMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseButtonLeft:
-		if msg.Action != tea.MouseActionPress {
+		if msg.Action != tea.MouseActionPress && msg.Action != tea.MouseActionRelease {
 			return m, nil
 		}
 		switch {
@@ -377,13 +422,13 @@ func (m *tuiModel) updateSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = tuiScreenMain
 		return m, nil
 	case "up", "k":
-		m.settingsSel = (m.settingsSel + 3) % 4
+		m.settingsSel = (m.settingsSel + 5) % 6
 	case "down", "j":
-		m.settingsSel = (m.settingsSel + 1) % 4
+		m.settingsSel = (m.settingsSel + 1) % 6
 	case "tab":
-		m.settingsSel = (m.settingsSel + 1) % 4
+		m.settingsSel = (m.settingsSel + 1) % 6
 	case "shift+tab":
-		m.settingsSel = (m.settingsSel + 3) % 4
+		m.settingsSel = (m.settingsSel + 5) % 6
 	case "left", "[":
 		m.settingsAdjust(-1)
 	case "right", "]":
@@ -406,6 +451,12 @@ func (m *tuiModel) updateSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case tuiSetVolume:
 			soundToggleVolumeScaling()
+		case tuiSetListenMouse:
+			mOn, _ := inputListenSnapshot()
+			setListenMouse(!mOn)
+		case tuiSetListenKeyboard:
+			_, kOn := inputListenSnapshot()
+			setListenKeyboard(!kOn)
 		}
 	default:
 		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
@@ -531,6 +582,16 @@ func (m *tuiModel) visibleEventLines(iw int) []string {
 func (m *tuiModel) viewMain() string {
 	iw := m.innerWidth()
 	cd, _, _ := soundSnapshot()
+	mOn, kOn := inputListenSnapshot()
+	inStr := "M:Y"
+	if !mOn {
+		inStr = "M:N"
+	}
+	if kOn {
+		inStr += " K:Y"
+	} else {
+		inStr += " K:N"
+	}
 
 	pausedMu.RLock()
 	isPaused := paused
@@ -540,10 +601,10 @@ func (m *tuiModel) viewMain() string {
 		pausedStr = "paused"
 	}
 
-	title := fmt.Sprintf(" spank %s | pack=%s | %s | cd=%dms | v%s · o settings · title: pause ",
-		m.tuningLabel, m.packName, pausedStr, cd, version)
+	title := fmt.Sprintf(" spank %s | pack=%s | %s | %s | cd=%dms | v%s · o settings ",
+		m.tuningLabel, m.packName, inStr, pausedStr, cd, version)
 	if len(title) > iw+8 {
-		title = fmt.Sprintf(" %s | %s | cd=%dms | v%s · o=settings ", m.packName, pausedStr, cd, version)
+		title = fmt.Sprintf(" %s %s | %s | cd=%dms | o=settings ", m.packName, inStr, pausedStr, cd)
 	}
 	title = ansi.Truncate(title, iw, "…")
 
@@ -558,7 +619,7 @@ func (m *tuiModel) viewMain() string {
 	footerRight := lipgloss.NewStyle().Reverse(true).Padding(0, 1).Render(" Quit ")
 	footer := lipgloss.JoinHorizontal(lipgloss.Top, footerLeft, " ", footerMid, " ", footerRight)
 	footer = ansi.Truncate(footer, iw, "…")
-	meta := "o sound settings · keys ↑↓/jk PgUp/Pg · home/g end/G · p r space · wheel scroll" + scrollHint
+	meta := "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Space/Enter" + scrollHint
 	if h := strings.TrimSpace(m.hintLine); h != "" {
 		meta = h + " · " + meta
 	}
@@ -606,15 +667,27 @@ func (m *tuiModel) viewSettings() string {
 	lineCD := fmt.Sprintf("%sCooldown (ms)     %d   ←/→ or [ ]  ±%d", mark(tuiSetCooldown), cd, cooldownStep)
 	lineSp := fmt.Sprintf("%sSpeed (×)         %.2f  , . fine  (%.2f–%.2f)", mark(tuiSetSpeed), sp, minSpeed, maxSpeed)
 	lineVol := fmt.Sprintf("%sVolume × hold     %s   (v) toggle", mark(tuiSetVolume), vol)
+	mOn, kOn := inputListenSnapshot()
+	mStr, kStr := "off", "off"
+	if mOn {
+		mStr = "on"
+	}
+	if kOn {
+		kStr = "on"
+	}
+	lineLM := fmt.Sprintf("%sListen mouse      %s   ←/→", mark(tuiSetListenMouse), mStr)
+	lineLK := fmt.Sprintf("%sListen keyboard   %s   Space/Enter · ←/→", mark(tuiSetListenKeyboard), kStr)
 
 	linePack = ansi.Truncate(linePack, iw, "…")
 	lineCD = ansi.Truncate(lineCD, iw, "…")
 	lineSp = ansi.Truncate(lineSp, iw, "…")
 	lineVol = ansi.Truncate(lineVol, iw, "…")
+	lineLM = ansi.Truncate(lineLM, iw, "…")
+	lineLK = ansi.Truncate(lineLK, iw, "…")
 
-	title := lipgloss.NewStyle().Bold(true).Render(ansi.Truncate(" Settings · sound · esc/o back · q quit ", iw, "…"))
+	title := lipgloss.NewStyle().Bold(true).Render(ansi.Truncate(" Settings · sound/input · esc/o back · q quit ", iw, "…"))
 	hint := lipgloss.NewStyle().Faint(true).Render(ansi.Truncate(
-		"↑↓/tab row · ←→ / wheel · space: next pack or toggle vol · v: vol", iw, "…"))
+		"↑↓/tab · ←→ / wheel · space: pack/vol/listen toggle · need M or K on", iw, "…"))
 
 	border := lipgloss.RoundedBorder()
 	box := lipgloss.NewStyle().
@@ -629,6 +702,8 @@ func (m *tuiModel) viewSettings() string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineCD),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineSp),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineVol),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineLM),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineLK),
 		hint,
 	)
 	return box.Render(inner)

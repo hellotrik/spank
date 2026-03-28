@@ -70,15 +70,26 @@ var (
 
 	// runtimeCustomPack is true when the user started with --custom/--custom-files; TUI cannot switch embedded packs.
 	runtimeCustomPack bool
+
+	// inputListenMu protects listenMouse and listenKeyboard.
+	inputListenMu  sync.RWMutex
+	listenMouse    = true
+	listenKeyboard = false
 )
 
 // mouseHoldLibErrOnce logs a single failure from CoreGraphics mouse APIs.
 var mouseHoldLibErrOnce sync.Once
 
+// keyboardHoldLibErrOnce logs a single failure from keyboard state APIs.
+var keyboardHoldLibErrOnce sync.Once
+
 type mouseHoldState struct {
 	down   bool
 	downAt time.Time
 }
+
+// keyboardHoldState tracks a single key hold/release (same shape as mouseHoldState).
+type keyboardHoldState = mouseHoldState
 
 type playMode int
 
@@ -289,6 +300,35 @@ func updateMouseLeftHold(s *mouseHoldState, now time.Time) (released bool, relTi
 	return false, time.Time{}, 0
 }
 
+func updateKeyHold(s *keyboardHoldState, now time.Time, downFn func() (bool, error), label string) (released bool, relTime time.Time, hold time.Duration) {
+	down, err := downFn()
+	if err != nil {
+		keyboardHoldLibErrOnce.Do(func() {
+			msg := fmt.Sprintf("spank: keyboard (%s): %v", label, err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
+		})
+		return false, time.Time{}, 0
+	}
+	switch {
+	case down && !s.down:
+		s.down = true
+		s.downAt = now
+	case !down && s.down:
+		s.down = false
+		return true, now, now.Sub(s.downAt)
+	}
+	return false, time.Time{}, 0
+}
+
+func updateSpaceKeyHold(s *keyboardHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
+	return updateKeyHold(s, now, spaceKeyDown, "Space")
+}
+
+func updateEnterKeyHold(s *keyboardHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
+	return updateKeyHold(s, now, enterKeyDown, "Enter")
+}
+
 func main() {
 	cmd := &cobra.Command{
 		Use:   "spank",
@@ -303,7 +343,9 @@ Use --halo for random Halo clips on each release.
 
 Use --lizard for lizard-style escalation like --sexy.
 
-Use --sward for the sward sound pack.`,
+Use --sward for the sward sound pack.
+
+Use --keyboard to also listen for Space and Enter key hold/release (independent of --mouse; both can be toggled in the TUI).`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -334,6 +376,8 @@ Use --sward for the sward sound pack.`,
 	cmd.Flags().IntVar(&logRetention, "log-retention-days", 7, "Delete log files older than this many days (by date in filename)")
 	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by hold duration (longer hold = louder)")
 	cmd.Flags().Float64Var(&speedRatio, "speed", defaultSpeedRatio, "Playback speed multiplier (0.5 = half speed, 2.0 = double speed)")
+	cmd.Flags().BoolVar(&listenMouse, "mouse", true, "Listen to left mouse button hold/release")
+	cmd.Flags().BoolVar(&listenKeyboard, "keyboard", false, "Listen to Space/Enter key hold/release (global; may overlap TUI keys)")
 
 	if err := fang.Execute(context.Background(), cmd); err != nil {
 		os.Exit(1)
@@ -367,6 +411,10 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 
 	if logRetention < 1 {
 		return fmt.Errorf("--log-retention-days must be at least 1")
+	}
+
+	if !listenMouse && !listenKeyboard {
+		return fmt.Errorf("at least one of --mouse or --keyboard must be enabled")
 	}
 
 	useWindowTUI = !stdioMode && !plainOutput
