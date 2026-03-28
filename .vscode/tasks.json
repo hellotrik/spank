@@ -1,0 +1,145 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Prepare: Windows PE icon (rsrc)",
+            "type": "shell",
+            "command": "go run github.com/akavel/rsrc@v0.10.2 -ico doc/icon.ico -o rsrc_windows_amd64.syso -arch amd64",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0"
+                }
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": [],
+            "icon": {
+                "id": "symbol-color"
+            }
+        },
+        {
+            "label": "Go: build spank (native)",
+            "type": "shell",
+            "command": "go build -o spank -ldflags=\"-s -w\" .",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$go"
+            ],
+            "icon": {
+                "id": "zap"
+            }
+        },
+        {
+            "label": "Go: build darwin/arm64",
+            "type": "shell",
+            "command": "go build -o spank_darwin_arm64 -ldflags=\"-s -w\" .",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0",
+                    "GOOS": "darwin",
+                    "GOARCH": "arm64"
+                }
+            },
+            "problemMatcher": [
+                "$go"
+            ],
+            "icon": {
+                "id": "play"
+            }
+        },
+        {
+            "label": "Go: build windows/amd64",
+            "type": "shell",
+            "command": "go build -o spank_windows_amd64.exe -ldflags=\"-s -w\" .",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0",
+                    "GOOS": "windows",
+                    "GOARCH": "amd64"
+                }
+            },
+            "dependsOn": [
+                "Prepare: Windows PE icon (rsrc)"
+            ],
+            "dependsOrder": "sequence",
+            "problemMatcher": [
+                "$go"
+            ],
+            "icon": {
+                "id": "rocket"
+            }
+        },
+        {
+            "label": "Package: macOS Spank.app (dist/)",
+            "type": "shell",
+            "command": "bash abs/sh/build_macos_app.sh",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0",
+                    "VERSION": "dev"
+                }
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": [
+                "$go"
+            ],
+            "icon": {
+                "id": "archive"
+            }
+        },
+        {
+            "label": "Package: GoReleaser snapshot (dist/)",
+            "type": "shell",
+            "command": "goreleaser release --snapshot --clean --skip=publish",
+            "options": {
+                "cwd": "${workspaceFolder}",
+                "env": {
+                    "CGO_ENABLED": "0"
+                }
+            },
+            "dependsOn": [
+                "Prepare: Windows PE icon (rsrc)"
+            ],
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "focus": true
+            },
+            "problemMatcher": [],
+            "icon": {
+                "id": "beaker"
+            }
+        }
+    ]
+}

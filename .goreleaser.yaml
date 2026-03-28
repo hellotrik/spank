@@ -22,6 +22,10 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w -X main.version={{.Version}}
+    hooks:
+      post:
+        # macOS .app bundle + AppIcon.icns (requires macOS builder: sips, iconutil).
+        - sh -c 'test "{{ .Os }}" != "darwin" || bash packaging/macos/bundle.sh "{{ .Path }}" "{{ .Version }}"'
 
 archives:
   - format: tar.gz

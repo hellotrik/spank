@@ -4,6 +4,6 @@ dist/
 .crush
 spank.test
 result
-.vscode/
+# .vscode/
 .DS_Store
 rsrc_*.syso
