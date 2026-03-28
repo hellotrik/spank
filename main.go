@@ -47,20 +47,29 @@ var haloAudio embed.FS
 var lizardAudio embed.FS
 
 var (
-	sexyMode     bool
-	haloMode     bool
-	lizardMode   bool
-	customPath   string
-	customFiles  []string
-	fastMode     bool
-	minAmplitude float64
-	cooldownMs   int
-	stdioMode      bool
-	volumeScaling  bool
-	paused         bool
-	pausedMu       sync.RWMutex
-	speedRatio     float64
+	sexyMode         bool
+	haloMode         bool
+	lizardMode       bool
+	customPath       string
+	customFiles      []string
+	fastMode         bool
+	minAmplitude     float64
+	cooldownMs       int
+	stdioMode        bool
+	volumeScaling    bool
+	paused           bool
+	pausedMu         sync.RWMutex
+	speedRatio       float64
+	mouseHoldMonitor bool
 )
+
+// mouseHoldLibErrOnce logs a single failure from CoreGraphics mouse APIs.
+var mouseHoldLibErrOnce sync.Once
+
+type mouseHoldState struct {
+	down   bool
+	downAt time.Time
+}
 
 // sensorReady is closed once shared memory is created and the sensor
 // worker is about to enter the CFRunLoop.
@@ -217,8 +226,83 @@ func (st *slapTracker) getFile(score float64) string {
 	// At sustained max slap rate, score reaches ssMax which maps
 	// to the final file.
 	maxIdx := len(st.pack.files) - 1
-	idx := min(int(float64(len(st.pack.files)) * (1.0 - math.Exp(-(score-1)/st.scale))), maxIdx)
+	idx := min(int(float64(len(st.pack.files))*(1.0-math.Exp(-(score-1)/st.scale))), maxIdx)
 	return st.pack.files[idx]
+}
+
+// mouseHoldMinPlay is ignores very short releases (noise / accidental clicks).
+const mouseHoldMinPlay = 30 * time.Millisecond
+
+// mouseHoldDurationToAmplitude maps hold time to a pseudo slap amplitude for
+// playback and --volume-scaling (longer hold -> louder, capped).
+func mouseHoldDurationToAmplitude(d time.Duration) float64 {
+	ms := float64(d) / float64(time.Millisecond)
+	const maxMs = 2500.0
+	if ms > maxMs {
+		ms = maxMs
+	}
+	t := ms / maxMs
+	return defaultMinAmplitude + t*(0.75-defaultMinAmplitude)
+}
+
+func emitMouseRelease(at time.Time, d time.Duration, played bool, reason string, num int, score, amp float64, file string) {
+	ms := float64(d) / float64(time.Millisecond)
+	if stdioMode {
+		ev := map[string]interface{}{
+			"type":         "mouse_hold_release",
+			"duration_ms":  ms,
+			"timestamp":    at.Format(time.RFC3339Nano),
+			"played":       played,
+			"trigger":      "mouse",
+		}
+		if reason != "" {
+			ev["reason"] = reason
+		}
+		if played {
+			ev["slapNumber"] = num
+			ev["score"] = score
+			ev["amplitude"] = amp
+			ev["file"] = file
+		}
+		if data, err := json.Marshal(ev); err == nil {
+			fmt.Println(string(data))
+		}
+		return
+	}
+	switch {
+	case played:
+		fmt.Printf("mouse #%d [held %.1fms amp=%.3f] -> %s\n", num, ms, amp, file)
+	case reason == "paused":
+		fmt.Printf("mouse: left held %.1fms (paused, no sound)\n", ms)
+	case reason == "cooldown":
+		fmt.Printf("mouse: left held %.1fms (cooldown, no sound)\n", ms)
+	case reason == "short":
+		fmt.Printf("mouse: left held %.1fms (too short, no sound)\n", ms)
+	default:
+		fmt.Printf("mouse: left held %.1fms (no sound)\n", ms)
+	}
+}
+
+func updateMouseLeftHold(s *mouseHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
+	if !mouseHoldMonitor {
+		return false, time.Time{}, 0
+	}
+	down, err := leftMouseButtonDown()
+	if err != nil {
+		mouseHoldLibErrOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "spank: --mouse-hold: %v\n", err)
+		})
+		return false, time.Time{}, 0
+	}
+	switch {
+	case down && !s.down:
+		s.down = true
+		s.downAt = now
+	case !down && s.down:
+		s.down = false
+		return true, now, now.Sub(s.downAt)
+	}
+	return false, time.Time{}, 0
 }
 
 func main() {
@@ -236,7 +320,10 @@ within a minute, the more intense the sounds become.
 Use --halo to play random audio clips from Halo soundtracks on each slap.
 
 Use --lizard for lizard mode. Like sexy mode, the more you slap
-within a minute, the more intense the sounds become.`,
+within a minute, the more intense the sounds become.
+
+Use --mouse-hold to treat left mouse button release like a trigger: logs hold
+duration and plays the same sound pack (shared cooldown with accelerometer slaps).`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -266,6 +353,7 @@ within a minute, the more intense the sounds become.`,
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
 	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by slap amplitude (harder hits = louder)")
 	cmd.Flags().Float64Var(&speedRatio, "speed", defaultSpeedRatio, "Playback speed multiplier (0.5 = half speed, 2.0 = double speed)")
+	cmd.Flags().BoolVar(&mouseHoldMonitor, "mouse-hold", false, "On left button release, log hold duration and play audio (same pack/cooldown as slaps)")
 
 	if err := fang.Execute(context.Background(), cmd); err != nil {
 		os.Exit(1)
@@ -397,6 +485,7 @@ func listenForSlaps(ctx context.Context, pack *soundPack, accelRing *shm.RingBuf
 	ticker := time.NewTicker(tuning.pollInterval)
 	defer ticker.Stop()
 
+	var mouseState mouseHoldState
 	for {
 		select {
 		case <-ctx.Done():
@@ -407,15 +496,42 @@ func listenForSlaps(ctx context.Context, pack *soundPack, accelRing *shm.RingBuf
 		case <-ticker.C:
 		}
 
-		// Check if paused
+		now := time.Now()
+		released, relTime, holdDur := updateMouseLeftHold(&mouseState, now)
+
 		pausedMu.RLock()
 		isPaused := paused
 		pausedMu.RUnlock()
+
+		if released {
+			cooldown := time.Duration(cooldownMs) * time.Millisecond
+			var reason string
+			played := false
+			var num int
+			var score, amp float64
+			var file string
+			switch {
+			case isPaused:
+				reason = "paused"
+			case holdDur < mouseHoldMinPlay:
+				reason = "short"
+			case time.Since(lastYell) <= cooldown:
+				reason = "cooldown"
+			default:
+				played = true
+				lastYell = now
+				amp = mouseHoldDurationToAmplitude(holdDur)
+				num, score = tracker.record(now)
+				file = tracker.getFile(score)
+				go playAudio(pack, file, amp, &speakerInit)
+			}
+			emitMouseRelease(relTime, holdDur, played, reason, num, score, amp, file)
+		}
+
 		if isPaused {
 			continue
 		}
 
-		now := time.Now()
 		tNow := float64(now.UnixNano()) / 1e9
 
 		samples, newTotal := accelRing.ReadNew(lastAccelTotal, shm.AccelScale)
@@ -468,7 +584,10 @@ func listenForSlaps(ctx context.Context, pack *soundPack, accelRing *shm.RingBuf
 	}
 }
 
-var speakerMu sync.Mutex
+var (
+	speakerMu       sync.Mutex
+	speakerInitFail bool // permanent: Init failed (e.g. root has no audio session on macOS)
+)
 
 // amplitudeToVolume maps a detected amplitude to a beep/effects.Volume
 // level. Amplitude typically ranges from ~0.05 (light tap) to ~1.0+
@@ -479,10 +598,10 @@ var speakerMu sync.Mutex
 // (base 2): -3.0 is ~1/8 volume, 0.0 is full volume.
 func amplitudeToVolume(amplitude float64) float64 {
 	const (
-		minAmp   = 0.05  // softest detectable
-		maxAmp   = 0.80  // treat anything above this as max
-		minVol   = -3.0  // quietest playback (1/8 volume with base 2)
-		maxVol   = 0.0   // full volume
+		minAmp = 0.05 // softest detectable
+		maxAmp = 0.80 // treat anything above this as max
+		minVol = -3.0 // quietest playback (1/8 volume with base 2)
+		maxVol = 0.0  // full volume
 	)
 
 	// Clamp
@@ -534,8 +653,17 @@ func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *boo
 	defer streamer.Close()
 
 	speakerMu.Lock()
+	if speakerInitFail {
+		speakerMu.Unlock()
+		return
+	}
 	if !*speakerInit {
-		speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10))
+		if err := speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10)); err != nil {
+			speakerInitFail = true
+			speakerMu.Unlock()
+			fmt.Fprintf(os.Stderr, "spank: speaker init failed (no playback): %v\n", err)
+			return
+		}
 		*speakerInit = true
 	}
 	speakerMu.Unlock()

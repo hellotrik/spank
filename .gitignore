@@ -5,3 +5,4 @@ dist/
 spank.test
 result
 .vscode/
+.DS_Store
