@@ -417,6 +417,7 @@ func run(ctx context.Context, tuning runtimeTuning, cmd *cobra.Command) error {
 	if stdioMode {
 		useWindowTUI = false
 	}
+	ensureDarwinTTYForWindowTUI()
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
