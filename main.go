@@ -379,6 +379,10 @@ Use --keyboard to also listen for Space and Enter key hold/release (independent 
 	cmd.Flags().BoolVar(&listenMouse, "mouse", true, "Listen to left mouse button hold/release")
 	cmd.Flags().BoolVar(&listenKeyboard, "keyboard", false, "Listen to Space/Enter key hold/release (global; may overlap TUI keys)")
 
+	// Cobra shows a "run from cmd.exe" splash when the parent is explorer.exe on Windows.
+	// spank is intended to run normally when double-clicked (TUI / console).
+	cobra.MousetrapHelpText = ""
+
 	if err := fang.Execute(context.Background(), cmd); err != nil {
 		os.Exit(1)
 	}

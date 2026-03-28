@@ -865,11 +865,15 @@ func runWindowTUI(ctx context.Context, pack *soundPack, tuning runtimeTuning) er
 	}
 
 	m := newTuiModel(rt, pack.name, presetLabel, tuning.pollInterval, hint)
-	p := tea.NewProgram(m,
+	cleanupIO, platOpts := bubbleTeaPlatformOptions()
+	defer cleanupIO()
+	opts := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
-	)
+	}
+	opts = append(opts, platOpts...)
+	p := tea.NewProgram(m, opts...)
 	_, err := p.Run()
 	if err != nil && !errors.Is(err, tea.ErrProgramKilled) {
 		return err
