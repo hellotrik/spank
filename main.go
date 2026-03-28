@@ -56,6 +56,16 @@ var (
 	paused        bool
 	pausedMu      sync.RWMutex
 	speedRatio    float64
+	plainOutput   bool // --no-tui / --plain: disable window TUI
+	logToFile     bool
+	logDir        string
+	logRetention  int
+
+	// soundMu protects cooldownMs, speedRatio, and volumeScaling (TUI, stdin, audio).
+	soundMu sync.RWMutex
+
+	// runtimeCustomPack is true when the user started with --custom/--custom-files; TUI cannot switch embedded packs.
+	runtimeCustomPack bool
 )
 
 // mouseHoldLibErrOnce logs a single failure from CoreGraphics mouse APIs.
@@ -149,6 +159,38 @@ func (sp *soundPack) loadFiles() error {
 	return nil
 }
 
+// loadEmbeddedPackByID loads a built-in pack by name (pain, sexy, halo, lizard).
+func loadEmbeddedPackByID(id string) (*soundPack, error) {
+	switch strings.ToLower(strings.TrimSpace(id)) {
+	case "pain":
+		p := &soundPack{name: "pain", fs: painAudio, dir: "audio/pain", mode: modeRandom}
+		if err := p.loadFiles(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "sexy":
+		p := &soundPack{name: "sexy", fs: sexyAudio, dir: "audio/sexy", mode: modeEscalation}
+		if err := p.loadFiles(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "halo":
+		p := &soundPack{name: "halo", fs: haloAudio, dir: "audio/halo", mode: modeRandom}
+		if err := p.loadFiles(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "lizard":
+		p := &soundPack{name: "lizard", fs: lizardAudio, dir: "audio/lizard", mode: modeEscalation}
+		if err := p.loadFiles(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	default:
+		return nil, fmt.Errorf("unknown embedded pack %q", id)
+	}
+}
+
 type slapTracker struct {
 	mu       sync.Mutex
 	score    float64
@@ -216,49 +258,13 @@ func mouseHoldDurationToAmplitude(d time.Duration) float64 {
 	return defaultMinAmplitude + t*(0.75-defaultMinAmplitude)
 }
 
-func emitMouseRelease(at time.Time, d time.Duration, played bool, reason string, num int, score, amp float64, file string) {
-	ms := float64(d) / float64(time.Millisecond)
-	if stdioMode {
-		ev := map[string]interface{}{
-			"type":        "mouse_hold_release",
-			"duration_ms": ms,
-			"timestamp":   at.Format(time.RFC3339Nano),
-			"played":      played,
-			"trigger":     "mouse",
-		}
-		if reason != "" {
-			ev["reason"] = reason
-		}
-		if played {
-			ev["slapNumber"] = num
-			ev["score"] = score
-			ev["amplitude"] = amp
-			ev["file"] = file
-		}
-		if data, err := json.Marshal(ev); err == nil {
-			fmt.Println(string(data))
-		}
-		return
-	}
-	switch {
-	case played:
-		fmt.Printf("mouse #%d [held %.1fms amp=%.3f] -> %s\n", num, ms, amp, file)
-	case reason == "paused":
-		fmt.Printf("mouse: left held %.1fms (paused, no sound)\n", ms)
-	case reason == "cooldown":
-		fmt.Printf("mouse: left held %.1fms (cooldown, no sound)\n", ms)
-	case reason == "short":
-		fmt.Printf("mouse: left held %.1fms (too short, no sound)\n", ms)
-	default:
-		fmt.Printf("mouse: left held %.1fms (no sound)\n", ms)
-	}
-}
-
 func updateMouseLeftHold(s *mouseHoldState, now time.Time) (released bool, relTime time.Time, hold time.Duration) {
 	down, err := leftMouseButtonDown()
 	if err != nil {
 		mouseHoldLibErrOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "spank: mouse: %v\n", err)
+			msg := fmt.Sprintf("spank: mouse: %v", err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 		})
 		return false, time.Time{}, 0
 	}
@@ -308,6 +314,11 @@ Use --lizard for lizard-style escalation like --sexy.`,
 	cmd.Flags().StringSliceVar(&customFiles, "custom-files", nil, "Comma-separated list of custom MP3 files")
 	cmd.Flags().IntVar(&cooldownMs, "cooldown", defaultCooldownMs, "Cooldown between responses in milliseconds")
 	cmd.Flags().BoolVar(&stdioMode, "stdio", false, "Enable stdio mode: JSON output and stdin commands (for GUI integration)")
+	cmd.Flags().BoolVar(&plainOutput, "no-tui", false, "Disable window TUI; print events as plain text (default on macOS/Windows is TUI)")
+	cmd.Flags().BoolVar(&plainOutput, "plain", false, "Same as --no-tui")
+	cmd.Flags().BoolVar(&logToFile, "log", false, "Append events to daily rotating log files under --log-dir")
+	cmd.Flags().StringVar(&logDir, "log-dir", ".", "Directory for log files when --log is set")
+	cmd.Flags().IntVar(&logRetention, "log-retention-days", 7, "Delete log files older than this many days (by date in filename)")
 	cmd.Flags().BoolVar(&volumeScaling, "volume-scaling", false, "Scale playback volume by hold duration (longer hold = louder)")
 	cmd.Flags().Float64Var(&speedRatio, "speed", defaultSpeedRatio, "Playback speed multiplier (0.5 = half speed, 2.0 = double speed)")
 
@@ -337,6 +348,18 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	if tuning.cooldown <= 0 {
 		return fmt.Errorf("--cooldown must be greater than 0")
 	}
+
+	if logRetention < 1 {
+		return fmt.Errorf("--log-retention-days must be at least 1")
+	}
+
+	useWindowTUI = !stdioMode && !plainOutput
+	if stdioMode {
+		useWindowTUI = false
+	}
+
+	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
 
 	var pack *soundPack
 	switch {
@@ -369,9 +392,32 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 			return fmt.Errorf("loading %s audio: %w", pack.name, err)
 		}
 	}
+	runtimeCustomPack = pack.custom
 
-	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
+	if logToFile {
+		lg, err := newRotatingDailyLogger(logDir, logRetention)
+		if err != nil {
+			return fmt.Errorf("file log: %w", err)
+		}
+		fileLogger = lg
+		defer func() {
+			_ = fileLogger.Close()
+			fileLogger = nil
+		}()
+		go func() {
+			ticker := time.NewTicker(24 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					fileLogger.Prune()
+				}
+			}
+		}()
+		logFileLine(fmt.Sprintf("spank start pack=%s version=%s stdio=%v plain=%v tui=%v", pack.name, version, stdioMode, plainOutput, useWindowTUI))
+	}
 
 	return platformRun(ctx, tuning, pack)
 }
@@ -449,24 +495,32 @@ func playAudioSync(pack *soundPack, path string, amplitude float64, speakerInit 
 	if pack.custom {
 		file, err := os.Open(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "spank: open %s: %v\n", path, err)
+			msg := fmt.Sprintf("spank: open %s: %v", path, err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 			return
 		}
 		defer file.Close()
 		streamer, format, err = mp3.Decode(file)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "spank: decode %s: %v\n", path, err)
+			msg := fmt.Sprintf("spank: decode %s: %v", path, err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 			return
 		}
 	} else {
 		data, err := pack.fs.ReadFile(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "spank: read %s: %v\n", path, err)
+			msg := fmt.Sprintf("spank: read %s: %v", path, err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 			return
 		}
 		streamer, format, err = mp3.Decode(io.NopCloser(bytes.NewReader(data)))
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "spank: decode %s: %v\n", path, err)
+			msg := fmt.Sprintf("spank: decode %s: %v", path, err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 			return
 		}
 	}
@@ -486,15 +540,22 @@ func playAudioSync(pack *soundPack, path string, amplitude float64, speakerInit 
 		if err := speaker.Init(format.SampleRate, bufSamples); err != nil {
 			speakerInitFail = true
 			speakerMu.Unlock()
-			fmt.Fprintf(os.Stderr, "spank: speaker init failed (no playback): %v\n", err)
+			msg := fmt.Sprintf("spank: speaker init failed (no playback): %v", err)
+			fmt.Fprintln(os.Stderr, msg)
+			logFileLine("ERROR " + msg)
 			return
 		}
 		*speakerInit = true
 	}
 	speakerMu.Unlock()
 
+	soundMu.RLock()
+	volScale := volumeScaling
+	spd := speedRatio
+	soundMu.RUnlock()
+
 	var source beep.Streamer = streamer
-	if volumeScaling {
+	if volScale {
 		source = &effects.Volume{
 			Streamer: streamer,
 			Base:     2,
@@ -503,8 +564,8 @@ func playAudioSync(pack *soundPack, path string, amplitude float64, speakerInit 
 		}
 	}
 
-	if speedRatio != 1.0 && speedRatio > 0 {
-		fakeRate := beep.SampleRate(int(float64(format.SampleRate) * speedRatio))
+	if spd != 1.0 && spd > 0 {
+		fakeRate := beep.SampleRate(int(float64(format.SampleRate) * spd))
 		source = beep.Resample(4, fakeRate, format.SampleRate, source)
 	}
 
@@ -561,26 +622,38 @@ func processCommands(r io.Reader, w io.Writer) {
 				fmt.Fprintln(w, `{"status":"resumed"}`)
 			}
 		case "set":
+			soundMu.Lock()
 			if cmd.Cooldown > 0 {
 				cooldownMs = cmd.Cooldown
 			}
 			if cmd.Speed > 0 {
 				speedRatio = cmd.Speed
 			}
+			cd := cooldownMs
+			sp := speedRatio
+			soundMu.Unlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"settings_updated","cooldown":%d,"speed":%.2f}%s`, cooldownMs, speedRatio, "\n")
+				fmt.Fprintf(w, `{"status":"settings_updated","cooldown":%d,"speed":%.2f}%s`, cd, sp, "\n")
 			}
 		case "volume-scaling":
+			soundMu.Lock()
 			volumeScaling = !volumeScaling
+			vs := volumeScaling
+			soundMu.Unlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"volume_scaling_toggled","volume_scaling":%t}%s`, volumeScaling, "\n")
+				fmt.Fprintf(w, `{"status":"volume_scaling_toggled","volume_scaling":%t}%s`, vs, "\n")
 			}
 		case "status":
 			pausedMu.RLock()
 			isPaused := paused
 			pausedMu.RUnlock()
+			soundMu.RLock()
+			cd := cooldownMs
+			vs := volumeScaling
+			sp := speedRatio
+			soundMu.RUnlock()
 			if stdioMode {
-				fmt.Fprintf(w, `{"status":"ok","paused":%t,"cooldown":%d,"volume_scaling":%t,"speed":%.2f}%s`, isPaused, cooldownMs, volumeScaling, speedRatio, "\n")
+				fmt.Fprintf(w, `{"status":"ok","paused":%t,"cooldown":%d,"volume_scaling":%t,"speed":%.2f}%s`, isPaused, cd, vs, sp, "\n")
 			}
 		default:
 			if stdioMode {
