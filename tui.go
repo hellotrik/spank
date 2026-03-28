@@ -38,7 +38,7 @@ const (
 )
 
 // Built-in pack order for TUI cycling (must match loadEmbeddedPackByID).
-var tuiEmbeddedPackOrder = []string{"pain", "sexy", "halo", "lizard"}
+var tuiEmbeddedPackOrder = []string{"pain", "sexy", "halo", "lizard", "sward"}
 
 const (
 	cooldownStep = 50
@@ -601,7 +601,7 @@ func (m *tuiModel) viewSettings() string {
 	if runtimeCustomPack {
 		linePack = fmt.Sprintf("%sSound pack        %s   (custom; CLI only)", mark(tuiSetPack), m.packName)
 	} else {
-		linePack = fmt.Sprintf("%sSound pack        %s   ←/→ sexy·halo·pain·lizard", mark(tuiSetPack), m.packName)
+		linePack = fmt.Sprintf("%sSound pack        %s   ←/→ cycle built-ins", mark(tuiSetPack), m.packName)
 	}
 	lineCD := fmt.Sprintf("%sCooldown (ms)     %d   ←/→ or [ ]  ±%d", mark(tuiSetCooldown), cd, cooldownStep)
 	lineSp := fmt.Sprintf("%sSpeed (×)         %.2f  , . fine  (%.2f–%.2f)", mark(tuiSetSpeed), sp, minSpeed, maxSpeed)

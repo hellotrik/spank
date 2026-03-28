@@ -43,10 +43,14 @@ var haloAudio embed.FS
 //go:embed audio/lizard/*.mp3
 var lizardAudio embed.FS
 
+//go:embed audio/sward/*.mp3
+var swardAudio embed.FS
+
 var (
 	sexyMode      bool
 	haloMode      bool
 	lizardMode    bool
+	swardMode     bool
 	customPath    string
 	customFiles   []string
 	fastMode      bool
@@ -159,7 +163,7 @@ func (sp *soundPack) loadFiles() error {
 	return nil
 }
 
-// loadEmbeddedPackByID loads a built-in pack by name (pain, sexy, halo, lizard).
+// loadEmbeddedPackByID loads a built-in pack by name (pain, sexy, halo, lizard, sward).
 func loadEmbeddedPackByID(id string) (*soundPack, error) {
 	switch strings.ToLower(strings.TrimSpace(id)) {
 	case "pain":
@@ -182,6 +186,12 @@ func loadEmbeddedPackByID(id string) (*soundPack, error) {
 		return p, nil
 	case "lizard":
 		p := &soundPack{name: "lizard", fs: lizardAudio, dir: "audio/lizard", mode: modeEscalation}
+		if err := p.loadFiles(); err != nil {
+			return nil, err
+		}
+		return p, nil
+	case "sward":
+		p := &soundPack{name: "sward", fs: swardAudio, dir: "audio/sward", mode: modeRandom}
 		if err := p.loadFiles(); err != nil {
 			return nil, err
 		}
@@ -291,7 +301,9 @@ intense the sounds become.
 
 Use --halo for random Halo clips on each release.
 
-Use --lizard for lizard-style escalation like --sexy.`,
+Use --lizard for lizard-style escalation like --sexy.
+
+Use --sward for the sward sound pack.`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -309,6 +321,7 @@ Use --lizard for lizard-style escalation like --sexy.`,
 	cmd.Flags().BoolVarP(&sexyMode, "sexy", "s", false, "Enable sexy mode")
 	cmd.Flags().BoolVarP(&haloMode, "halo", "H", false, "Enable halo mode")
 	cmd.Flags().BoolVarP(&lizardMode, "lizard", "l", false, "Enable lizard mode (escalating intensity)")
+	cmd.Flags().BoolVar(&swardMode, "sward", false, "Enable sward sound pack")
 	cmd.Flags().StringVarP(&customPath, "custom", "c", "", "Path to custom MP3 audio directory")
 	cmd.Flags().BoolVar(&fastMode, "fast", false, "Shorter mouse poll interval and cooldown")
 	cmd.Flags().StringSliceVar(&customFiles, "custom-files", nil, "Comma-separated list of custom MP3 files")
@@ -338,11 +351,14 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	if lizardMode {
 		modeCount++
 	}
+	if swardMode {
+		modeCount++
+	}
 	if customPath != "" || len(customFiles) > 0 {
 		modeCount++
 	}
 	if modeCount > 1 {
-		return fmt.Errorf("--sexy, --halo, --lizard, and --custom/--custom-files are mutually exclusive; pick one")
+		return fmt.Errorf("--sexy, --halo, --lizard, --sward, and --custom/--custom-files are mutually exclusive; pick one")
 	}
 
 	if tuning.cooldown <= 0 {
@@ -382,6 +398,8 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 		pack = &soundPack{name: "halo", fs: haloAudio, dir: "audio/halo", mode: modeRandom}
 	case lizardMode:
 		pack = &soundPack{name: "lizard", fs: lizardAudio, dir: "audio/lizard", mode: modeEscalation}
+	case swardMode:
+		pack = &soundPack{name: "sward", fs: swardAudio, dir: "audio/sward", mode: modeRandom}
 	default:
 		pack = &soundPack{name: "pain", fs: painAudio, dir: "audio/pain", mode: modeRandom}
 	}
