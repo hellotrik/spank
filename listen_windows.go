@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 )
 
@@ -22,6 +23,7 @@ func listenForMouseOnly(ctx context.Context, pack *soundPack, tuning runtimeTuni
 		presetLabel = "fast"
 	}
 	fmt.Printf("spank: Windows — mouse hold triggers only (%s pack, %s tuning); ctrl+c to quit\n", pack.name, presetLabel)
+	fmt.Fprintln(os.Stderr, "spank: if cmd title shows “Select”/「选择」or you dragged to select text, Windows pauses this program — press Esc or disable Quick Edit Mode (cmd → Properties → Options).")
 	if stdioMode {
 		fmt.Println(`{"status":"ready","platform":"windows"}`)
 	}

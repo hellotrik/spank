@@ -15,6 +15,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -417,7 +418,30 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 var (
 	speakerMu       sync.Mutex
 	speakerInitFail bool // permanent: Init failed (e.g. root has no audio session on macOS)
+
+	audioWorkerOnce sync.Once
+	audioJobCh      chan audioJob
 )
+
+// audioJob queues work for a single goroutine so oto/speaker/mixer are never
+// used concurrently (avoids hangs on Windows); callers stay non-blocking.
+type audioJob struct {
+	pack         *soundPack
+	path         string
+	amplitude    float64
+	speakerInit *bool
+}
+
+func ensureAudioWorker() {
+	audioWorkerOnce.Do(func() {
+		audioJobCh = make(chan audioJob, 32)
+		go func() {
+			for j := range audioJobCh {
+				playAudioSync(j.pack, j.path, j.amplitude, j.speakerInit)
+			}
+		}()
+	})
+}
 
 // amplitudeToVolume maps a detected amplitude to a beep/effects.Volume
 // level. Amplitude typically ranges from ~0.05 (light tap) to ~1.0+
@@ -453,6 +477,11 @@ func amplitudeToVolume(amplitude float64) float64 {
 }
 
 func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *bool) {
+	ensureAudioWorker()
+	audioJobCh <- audioJob{pack: pack, path: path, amplitude: amplitude, speakerInit: speakerInit}
+}
+
+func playAudioSync(pack *soundPack, path string, amplitude float64, speakerInit *bool) {
 	var streamer beep.StreamSeekCloser
 	var format beep.Format
 
@@ -482,13 +511,18 @@ func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *boo
 	}
 	defer streamer.Close()
 
+	bufSamples := format.SampleRate.N(time.Second / 10)
+	if runtime.GOOS == "windows" {
+		bufSamples = format.SampleRate.N(time.Second / 4)
+	}
+
 	speakerMu.Lock()
 	if speakerInitFail {
 		speakerMu.Unlock()
 		return
 	}
 	if !*speakerInit {
-		if err := speaker.Init(format.SampleRate, format.SampleRate.N(time.Second/10)); err != nil {
+		if err := speaker.Init(format.SampleRate, bufSamples); err != nil {
 			speakerInitFail = true
 			speakerMu.Unlock()
 			fmt.Fprintf(os.Stderr, "spank: speaker init failed (no playback): %v\n", err)
@@ -498,7 +532,6 @@ func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *boo
 	}
 	speakerMu.Unlock()
 
-	// Optionally scale volume based on slap amplitude
 	var source beep.Streamer = streamer
 	if volumeScaling {
 		source = &effects.Volume{
@@ -509,9 +542,6 @@ func playAudio(pack *soundPack, path string, amplitude float64, speakerInit *boo
 		}
 	}
 
-	// Apply speed change via resampling trick:
-	// Claiming the audio is at rate*speed and resampling back to rate
-	// makes the speaker consume samples faster/slower.
 	if speedRatio != 1.0 && speedRatio > 0 {
 		fakeRate := beep.SampleRate(int(float64(format.SampleRate) * speedRatio))
 		source = beep.Resample(4, fakeRate, format.SampleRate, source)
