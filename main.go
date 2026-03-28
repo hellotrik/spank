@@ -27,9 +27,6 @@ import (
 	"github.com/gopxl/beep/v2/mp3"
 	"github.com/gopxl/beep/v2/speaker"
 	"github.com/spf13/cobra"
-	"github.com/taigrr/apple-silicon-accelerometer/detector"
-	"github.com/taigrr/apple-silicon-accelerometer/sensor"
-	"github.com/taigrr/apple-silicon-accelerometer/shm"
 )
 
 var version = "dev"
@@ -70,13 +67,6 @@ type mouseHoldState struct {
 	down   bool
 	downAt time.Time
 }
-
-// sensorReady is closed once shared memory is created and the sensor
-// worker is about to enter the CFRunLoop.
-var sensorReady = make(chan struct{})
-
-// sensorErr receives any error from the sensor worker.
-var sensorErr = make(chan error, 1)
 
 type playMode int
 
@@ -249,11 +239,11 @@ func emitMouseRelease(at time.Time, d time.Duration, played bool, reason string,
 	ms := float64(d) / float64(time.Millisecond)
 	if stdioMode {
 		ev := map[string]interface{}{
-			"type":         "mouse_hold_release",
-			"duration_ms":  ms,
-			"timestamp":    at.Format(time.RFC3339Nano),
-			"played":       played,
-			"trigger":      "mouse",
+			"type":        "mouse_hold_release",
+			"duration_ms": ms,
+			"timestamp":   at.Format(time.RFC3339Nano),
+			"played":      played,
+			"trigger":     "mouse",
 		}
 		if reason != "" {
 			ev["reason"] = reason
@@ -312,7 +302,8 @@ func main() {
 		Long: `spank reads the Apple Silicon accelerometer directly via IOKit HID
 and plays audio responses when a slap or hit is detected.
 
-Requires sudo (for IOKit HID access to the accelerometer).
+On macOS: requires sudo (IOKit HID accelerometer). Windows builds have no
+accelerometer; use --mouse-hold only (GetAsyncKeyState / left button).
 
 Use --sexy for a different experience. In sexy mode, the more you slap
 within a minute, the more intense the sounds become.
@@ -323,7 +314,7 @@ Use --lizard for lizard mode. Like sexy mode, the more you slap
 within a minute, the more intense the sounds become.
 
 Use --mouse-hold to treat left mouse button release like a trigger: logs hold
-duration and plays the same sound pack (shared cooldown with accelerometer slaps).`,
+duration and plays the same sound pack (shared cooldown with accelerometer slaps on macOS).`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -361,10 +352,6 @@ duration and plays the same sound pack (shared cooldown with accelerometer slaps
 }
 
 func run(ctx context.Context, tuning runtimeTuning) error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("spank requires root privileges for accelerometer access, run with: sudo spank")
-	}
-
 	modeCount := 0
 	if sexyMode {
 		modeCount++
@@ -424,164 +411,7 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Create shared memory for accelerometer data.
-	accelRing, err := shm.CreateRing(shm.NameAccel)
-	if err != nil {
-		return fmt.Errorf("creating accel shm: %w", err)
-	}
-	defer accelRing.Close()
-	defer accelRing.Unlink()
-
-	// Start the sensor worker in a background goroutine.
-	// sensor.Run() needs runtime.LockOSThread for CFRunLoop, which it
-	// handles internally. We launch detection on the current goroutine.
-	go func() {
-		close(sensorReady)
-		if err := sensor.Run(sensor.Config{
-			AccelRing: accelRing,
-			Restarts:  0,
-		}); err != nil {
-			sensorErr <- err
-		}
-	}()
-
-	// Wait for sensor to be ready.
-	select {
-	case <-sensorReady:
-	case err := <-sensorErr:
-		return fmt.Errorf("sensor worker failed: %w", err)
-	case <-ctx.Done():
-		return nil
-	}
-
-	// Give the sensor a moment to start producing data.
-	time.Sleep(sensorStartupDelay)
-
-	return listenForSlaps(ctx, pack, accelRing, tuning)
-}
-
-func listenForSlaps(ctx context.Context, pack *soundPack, accelRing *shm.RingBuffer, tuning runtimeTuning) error {
-	tracker := newSlapTracker(pack, tuning.cooldown)
-	speakerInit := false
-	det := detector.New()
-	var lastAccelTotal uint64
-	var lastEventTime time.Time
-	var lastYell time.Time
-
-	// Start stdin command reader if in JSON mode
-	if stdioMode {
-		go readStdinCommands()
-	}
-
-	presetLabel := "default"
-	if fastMode {
-		presetLabel = "fast"
-	}
-	fmt.Printf("spank: listening for slaps in %s mode with %s tuning... (ctrl+c to quit)\n", pack.name, presetLabel)
-	if stdioMode {
-		fmt.Println(`{"status":"ready"}`)
-	}
-
-	ticker := time.NewTicker(tuning.pollInterval)
-	defer ticker.Stop()
-
-	var mouseState mouseHoldState
-	for {
-		select {
-		case <-ctx.Done():
-			fmt.Println("\nbye!")
-			return nil
-		case err := <-sensorErr:
-			return fmt.Errorf("sensor worker failed: %w", err)
-		case <-ticker.C:
-		}
-
-		now := time.Now()
-		released, relTime, holdDur := updateMouseLeftHold(&mouseState, now)
-
-		pausedMu.RLock()
-		isPaused := paused
-		pausedMu.RUnlock()
-
-		if released {
-			cooldown := time.Duration(cooldownMs) * time.Millisecond
-			var reason string
-			played := false
-			var num int
-			var score, amp float64
-			var file string
-			switch {
-			case isPaused:
-				reason = "paused"
-			case holdDur < mouseHoldMinPlay:
-				reason = "short"
-			case time.Since(lastYell) <= cooldown:
-				reason = "cooldown"
-			default:
-				played = true
-				lastYell = now
-				amp = mouseHoldDurationToAmplitude(holdDur)
-				num, score = tracker.record(now)
-				file = tracker.getFile(score)
-				go playAudio(pack, file, amp, &speakerInit)
-			}
-			emitMouseRelease(relTime, holdDur, played, reason, num, score, amp, file)
-		}
-
-		if isPaused {
-			continue
-		}
-
-		tNow := float64(now.UnixNano()) / 1e9
-
-		samples, newTotal := accelRing.ReadNew(lastAccelTotal, shm.AccelScale)
-		lastAccelTotal = newTotal
-		if len(samples) > tuning.maxBatch {
-			samples = samples[len(samples)-tuning.maxBatch:]
-		}
-
-		nSamples := len(samples)
-		for idx, sample := range samples {
-			tSample := tNow - float64(nSamples-idx-1)/float64(det.FS)
-			det.Process(sample.X, sample.Y, sample.Z, tSample)
-		}
-
-		if len(det.Events) == 0 {
-			continue
-		}
-
-		ev := det.Events[len(det.Events)-1]
-		if ev.Time.Equal(lastEventTime) {
-			continue
-		}
-		lastEventTime = ev.Time
-
-		if time.Since(lastYell) <= time.Duration(cooldownMs)*time.Millisecond {
-			continue
-		}
-		if ev.Amplitude < minAmplitude {
-			continue
-		}
-
-		lastYell = now
-		num, score := tracker.record(now)
-		file := tracker.getFile(score)
-		if stdioMode {
-			event := map[string]interface{}{
-				"timestamp":  now.Format(time.RFC3339Nano),
-				"slapNumber": num,
-				"amplitude":  ev.Amplitude,
-				"severity":   string(ev.Severity),
-				"file":       file,
-			}
-			if data, err := json.Marshal(event); err == nil {
-				fmt.Println(string(data))
-			}
-		} else {
-			fmt.Printf("slap #%d [%s amp=%.5fg] -> %s\n", num, ev.Severity, ev.Amplitude, file)
-		}
-		go playAudio(pack, file, ev.Amplitude, &speakerInit)
-	}
+	return platformRun(ctx, tuning, pack)
 }
 
 var (
