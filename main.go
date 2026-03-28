@@ -341,7 +341,7 @@ Use --lizard for lizard-style escalation like --sexy.
 
 Use --sward for the sward sound pack.
 
-Use --keyboard to also listen for Enter key hold/release (independent of --mouse; both can be toggled in the TUI).`,
+Use --keyboard / --mouse=false to listen only to Enter; settings persist to spank.json in the working directory.`,
 		Version: version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tuning := defaultTuning()
@@ -351,7 +351,7 @@ Use --keyboard to also listen for Enter key hold/release (independent of --mouse
 			if cmd.Flags().Changed("cooldown") {
 				tuning.cooldown = time.Duration(cooldownMs) * time.Millisecond
 			}
-			return run(cmd.Context(), tuning)
+			return run(cmd.Context(), tuning, cmd)
 		},
 		SilenceUsage: true,
 	}
@@ -384,7 +384,7 @@ Use --keyboard to also listen for Enter key hold/release (independent of --mouse
 	}
 }
 
-func run(ctx context.Context, tuning runtimeTuning) error {
+func run(ctx context.Context, tuning runtimeTuning, cmd *cobra.Command) error {
 	modeCount := 0
 	if sexyMode {
 		modeCount++
@@ -413,10 +413,6 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 		return fmt.Errorf("--log-retention-days must be at least 1")
 	}
 
-	if !listenMouse && !listenKeyboard {
-		return fmt.Errorf("at least one of --mouse or --keyboard must be enabled")
-	}
-
 	useWindowTUI = !stdioMode && !plainOutput
 	if stdioMode {
 		useWindowTUI = false
@@ -424,6 +420,22 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 
 	ctx, cancel := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	defer disableFileLogging()
+	appRunContext = ctx
+	defer func() { appRunContext = nil }()
+
+	if err := loadSpankConfig(cmd); err != nil {
+		return err
+	}
+	clampConfigBounds()
+
+	if !listenMouse && !listenKeyboard {
+		return fmt.Errorf("at least one of --mouse or --keyboard must be enabled")
+	}
+
+	if !fastMode {
+		tuning.cooldown = time.Duration(cooldownMs) * time.Millisecond
+	}
 
 	var pack *soundPack
 	switch {
@@ -449,7 +461,16 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 	case swardMode:
 		pack = &soundPack{name: "sward", fs: swardAudio, dir: "audio/sward", mode: modeRandom}
 	default:
-		pack = &soundPack{name: "pain", fs: painAudio, dir: "audio/pain", mode: modeRandom}
+		pid := "pain"
+		if embeddedPackForConfig != "" {
+			pid = embeddedPackForConfig
+		}
+		p, err := loadEmbeddedPackByID(pid)
+		if err != nil {
+			pack = &soundPack{name: "pain", fs: painAudio, dir: "audio/pain", mode: modeRandom}
+		} else {
+			pack = p
+		}
 	}
 
 	// Only load files if not already set (customFiles case)
@@ -459,29 +480,16 @@ func run(ctx context.Context, tuning runtimeTuning) error {
 		}
 	}
 	runtimeCustomPack = pack.custom
+	if !pack.custom {
+		embeddedPackForConfig = pack.name
+	} else {
+		embeddedPackForConfig = ""
+	}
 
 	if logToFile {
-		lg, err := newRotatingDailyLogger(logDir, logRetention)
-		if err != nil {
+		if err := enableFileLogging(ctx); err != nil {
 			return fmt.Errorf("file log: %w", err)
 		}
-		fileLogger = lg
-		defer func() {
-			_ = fileLogger.Close()
-			fileLogger = nil
-		}()
-		go func() {
-			ticker := time.NewTicker(24 * time.Hour)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					fileLogger.Prune()
-				}
-			}
-		}()
 		logFileLine(fmt.Sprintf("spank start pack=%s version=%s stdio=%v plain=%v tui=%v", pack.name, version, stdioMode, plainOutput, useWindowTUI))
 	}
 

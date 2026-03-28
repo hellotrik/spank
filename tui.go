@@ -45,8 +45,8 @@ const (
 	tuiSetCooldown
 	tuiSetSpeed
 	tuiSetVolume
-	tuiSetListenMouse
-	tuiSetListenKeyboard
+	tuiSetInputMode
+	tuiSetLog
 )
 
 // Built-in pack order for TUI cycling (must match loadEmbeddedPackByID).
@@ -120,6 +120,7 @@ func soundSetCooldown(ms int) {
 	cooldownMs = ms
 	soundMu.Unlock()
 	logFileLine(fmt.Sprintf("tui: cooldown=%dms", ms))
+	persistSpankConfig()
 }
 
 func soundAdjustCooldown(delta int) {
@@ -138,6 +139,7 @@ func soundSetSpeed(s float64) {
 	speedRatio = s
 	soundMu.Unlock()
 	logFileLine(fmt.Sprintf("tui: speed=%.2fx", s))
+	persistSpankConfig()
 }
 
 func soundAdjustSpeed(delta float64) {
@@ -150,6 +152,7 @@ func soundSetVolumeScaling(on bool) {
 	volumeScaling = on
 	soundMu.Unlock()
 	logFileLine(fmt.Sprintf("tui: volume_scaling=%v", on))
+	persistSpankConfig()
 }
 
 func soundToggleVolumeScaling() {
@@ -158,6 +161,7 @@ func soundToggleVolumeScaling() {
 	v := volumeScaling
 	soundMu.Unlock()
 	logFileLine(fmt.Sprintf("tui: volume_scaling=%v", v))
+	persistSpankConfig()
 }
 
 func inputListenSnapshot() (mouseOn, kbOn bool) {
@@ -166,26 +170,18 @@ func inputListenSnapshot() (mouseOn, kbOn bool) {
 	return listenMouse, listenKeyboard
 }
 
-func setListenMouse(on bool) {
-	inputListenMu.Lock()
-	defer inputListenMu.Unlock()
-	if !on && !listenKeyboard {
-		logFileLine("tui: at least one of mouse or keyboard must stay on")
-		return
+func inputModeLabel() string {
+	m, k := inputListenSnapshot()
+	switch {
+	case m && k:
+		return "mouse + keyboard"
+	case m:
+		return "mouse only"
+	case k:
+		return "keyboard only"
+	default:
+		return "?"
 	}
-	listenMouse = on
-	logFileLine(fmt.Sprintf("tui: listen_mouse=%v", on))
-}
-
-func setListenKeyboard(on bool) {
-	inputListenMu.Lock()
-	defer inputListenMu.Unlock()
-	if !on && !listenMouse {
-		logFileLine("tui: at least one of mouse or keyboard must stay on")
-		return
-	}
-	listenKeyboard = on
-	logFileLine(fmt.Sprintf("tui: listen_keyboard=%v", on))
 }
 
 func (m *tuiModel) cyclePack(delta int) {
@@ -209,7 +205,9 @@ func (m *tuiModel) cyclePack(delta int) {
 	}
 	m.rt.switchToPack(p)
 	m.packName = p.name
+	embeddedPackForConfig = p.name
 	logFileLine(fmt.Sprintf("tui: pack=%s", p.name))
+	persistSpankConfig()
 }
 
 func (m *tuiModel) tickCmd() tea.Cmd {
@@ -288,16 +286,16 @@ func (m *tuiModel) layoutMainRows0Based() (titleY, eventLastY, footerBtnY, inner
 }
 
 // Settings panel: border, title, pack + sound rows + input rows, hint (same 0-based Y as MouseMsg).
-func (m *tuiModel) layoutSettingsRows0Based() (titleY, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY int) {
+func (m *tuiModel) layoutSettingsRows0Based() (titleY, rowPack, rowCD, rowSp, rowVol, rowInput, rowLog, hintY int) {
 	titleY = 1
 	rowPack = 2
 	rowCD = 3
 	rowSp = 4
 	rowVol = 5
-	rowListenM = 6
-	rowListenK = 7
+	rowInput = 6
+	rowLog = 7
 	hintY = 8
-	return titleY, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY
+	return titleY, rowPack, rowCD, rowSp, rowVol, rowInput, rowLog, hintY
 }
 
 func (m *tuiModel) scrollWheel(delta int) {
@@ -445,23 +443,22 @@ func (m *tuiModel) settingsAdjust(dir int) {
 		} else if dir < 0 {
 			soundSetVolumeScaling(false)
 		}
-	case tuiSetListenMouse:
-		if dir > 0 {
-			setListenMouse(true)
-		} else if dir < 0 {
-			setListenMouse(false)
+	case tuiSetInputMode:
+		cycleInputMode(dir)
+	case tuiSetLog:
+		if appRunContext == nil {
+			break
 		}
-	case tuiSetListenKeyboard:
 		if dir > 0 {
-			setListenKeyboard(true)
+			setLogEnabled(appRunContext, true)
 		} else if dir < 0 {
-			setListenKeyboard(false)
+			setLogEnabled(appRunContext, false)
 		}
 	}
 }
 
 func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	_, rowPack, rowCD, rowSp, rowVol, rowListenM, rowListenK, hintY := m.layoutSettingsRows0Based()
+	_, rowPack, rowCD, rowSp, rowVol, rowInput, rowLog, hintY := m.layoutSettingsRows0Based()
 	y := msg.Y
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
@@ -487,10 +484,10 @@ func (m *tuiModel) updateSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.settingsSel = tuiSetSpeed
 		case rowVol:
 			m.settingsSel = tuiSetVolume
-		case rowListenM:
-			m.settingsSel = tuiSetListenMouse
-		case rowListenK:
-			m.settingsSel = tuiSetListenKeyboard
+		case rowInput:
+			m.settingsSel = tuiSetInputMode
+		case rowLog:
+			m.settingsSel = tuiSetLog
 		}
 		return m, nil
 	default:
@@ -573,12 +570,12 @@ func (m *tuiModel) updateSettingsKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case tuiSetVolume:
 			soundToggleVolumeScaling()
-		case tuiSetListenMouse:
-			mOn, _ := inputListenSnapshot()
-			setListenMouse(!mOn)
-		case tuiSetListenKeyboard:
-			_, kOn := inputListenSnapshot()
-			setListenKeyboard(!kOn)
+		case tuiSetInputMode:
+			cycleInputMode(1)
+		case tuiSetLog:
+			if appRunContext != nil {
+				setLogEnabled(appRunContext, !logToFile)
+			}
 		}
 	default:
 		if msg.Type == tea.KeyRunes && len(msg.Runes) == 1 {
@@ -711,16 +708,7 @@ func (m *tuiModel) visibleEventLines(iw int) []string {
 func (m *tuiModel) viewMain() string {
 	iw := m.innerWidth()
 	cd, _, _ := soundSnapshot()
-	mOn, kOn := inputListenSnapshot()
-	inStr := "M:Y"
-	if !mOn {
-		inStr = "M:N"
-	}
-	if kOn {
-		inStr += " K:Y"
-	} else {
-		inStr += " K:N"
-	}
+	inStr := "in:" + inputModeLabel()
 
 	pausedMu.RLock()
 	isPaused := paused
@@ -747,7 +735,7 @@ func (m *tuiModel) viewMain() string {
 	if lipgloss.Width(toolbar) > iw {
 		toolbar = ansi.Truncate(toolbar, iw, "…")
 	}
-	meta := m.mainMouseDebugPrefix() + "o settings · mouse/keyboard toggles there · p r · space pause · wheel scroll · K listens Enter" + scrollHint
+	meta := m.mainMouseDebugPrefix() + "o settings · input 3-way + file log there · p r · space pause · wheel scroll" + scrollHint
 	if h := strings.TrimSpace(m.hintLine); h != "" {
 		meta = h + " · " + meta
 	}
@@ -795,26 +783,22 @@ func (m *tuiModel) viewSettings() string {
 	lineCD := fmt.Sprintf("%sCooldown (ms)     %d   ←/→ or [ ]  ±%d", mark(tuiSetCooldown), cd, cooldownStep)
 	lineSp := fmt.Sprintf("%sSpeed (×)         %.2f  , . fine  (%.2f–%.2f)", mark(tuiSetSpeed), sp, minSpeed, maxSpeed)
 	lineVol := fmt.Sprintf("%sVolume × hold     %s   (v) toggle", mark(tuiSetVolume), vol)
-	mOn, kOn := inputListenSnapshot()
-	mStr, kStr := "off", "off"
-	if mOn {
-		mStr = "on"
+	lineIn := fmt.Sprintf("%sListen input       %s   ←/→", mark(tuiSetInputMode), inputModeLabel())
+	logStr := "off"
+	if logToFile {
+		logStr = "on"
 	}
-	if kOn {
-		kStr = "on"
-	}
-	lineLM := fmt.Sprintf("%sListen mouse      %s   ←/→", mark(tuiSetListenMouse), mStr)
-	lineLK := fmt.Sprintf("%sListen keyboard   %s   Enter · ←/→", mark(tuiSetListenKeyboard), kStr)
+	lineLog := fmt.Sprintf("%sFile log           %s   spank.json + daily .log · ←/→", mark(tuiSetLog), logStr)
 
 	linePack = ansi.Truncate(linePack, iw, "…")
 	lineCD = ansi.Truncate(lineCD, iw, "…")
 	lineSp = ansi.Truncate(lineSp, iw, "…")
 	lineVol = ansi.Truncate(lineVol, iw, "…")
-	lineLM = ansi.Truncate(lineLM, iw, "…")
-	lineLK = ansi.Truncate(lineLK, iw, "…")
+	lineIn = ansi.Truncate(lineIn, iw, "…")
+	lineLog = ansi.Truncate(lineLog, iw, "…")
 
 	title := lipgloss.NewStyle().Bold(true).Render(ansi.Truncate(" Settings · sound/input · esc/o back · q quit ", iw, "…"))
-	hintStr := "↑↓/tab · ←→ / wheel · space: pack/vol/listen toggle · need M or K on"
+	hintStr := "↑↓/tab · ←→ / wheel · space: pack/vol/input/log · need an input mode"
 	if m.mouseSeen {
 		hintStr = fmt.Sprintf("ptr(%d,%d) · ", m.mouseX, m.mouseY) + hintStr
 	}
@@ -833,8 +817,8 @@ func (m *tuiModel) viewSettings() string {
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineCD),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineSp),
 		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineVol),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineLM),
-		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineLK),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineIn),
+		lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(lineLog),
 		hint,
 	)
 	return box.Render(inner)

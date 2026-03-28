@@ -6,10 +6,7 @@ import (
 	"time"
 )
 
-var (
-	fileLogger   *rotatingDailyLogger
-	useWindowTUI bool
-)
+var useWindowTUI bool
 
 func formatInputReleaseHuman(trigger string, at time.Time, d time.Duration, played bool, reason string, num int, amp float64, file string) string {
 	ms := float64(d) / float64(time.Millisecond)
@@ -35,8 +32,11 @@ func formatInputReleaseHuman(trigger string, at time.Time, d time.Duration, play
 // trigger is "mouse" or "keyboard".
 func dispatchInputRelease(trigger string, at time.Time, d time.Duration, played bool, reason string, num int, score, amp float64, file string) []string {
 	human := formatInputReleaseHuman(trigger, at, d, played, reason, num, amp, file)
-	if fileLogger != nil {
-		fileLogger.WriteLine(human)
+	fileLoggerMu.RLock()
+	lg := fileLogger
+	fileLoggerMu.RUnlock()
+	if lg != nil {
+		lg.WriteLine(human)
 	}
 
 	if stdioMode {
@@ -73,10 +73,4 @@ func dispatchInputRelease(trigger string, at time.Time, d time.Duration, played 
 
 	fmt.Println(human)
 	return nil
-}
-
-func logFileLine(msg string) {
-	if fileLogger != nil {
-		fileLogger.WriteLine(msg)
-	}
 }

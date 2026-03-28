@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,58 @@ type rotatingDailyLogger struct {
 }
 
 var spankLogNameRe = regexp.MustCompile(`^spank-(\d{4}-\d{2}-\d{2})\.log$`)
+
+// fileLogger is nil when file logging is off. Guard with fileLoggerMu for enable/disable.
+var (
+	fileLogger      *rotatingDailyLogger
+	fileLoggerMu    sync.RWMutex
+	logPruneCancel  context.CancelFunc
+)
+
+func enableFileLogging(parent context.Context) error {
+	fileLoggerMu.Lock()
+	defer fileLoggerMu.Unlock()
+	if fileLogger != nil {
+		return nil
+	}
+	lg, err := newRotatingDailyLogger(logDir, logRetention)
+	if err != nil {
+		return err
+	}
+	fileLogger = lg
+	pruneCtx, cancel := context.WithCancel(parent)
+	logPruneCancel = cancel
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pruneCtx.Done():
+				return
+			case <-ticker.C:
+				fileLoggerMu.Lock()
+				if fileLogger != nil {
+					fileLogger.Prune()
+				}
+				fileLoggerMu.Unlock()
+			}
+		}
+	}()
+	return nil
+}
+
+func disableFileLogging() {
+	fileLoggerMu.Lock()
+	defer fileLoggerMu.Unlock()
+	if logPruneCancel != nil {
+		logPruneCancel()
+		logPruneCancel = nil
+	}
+	if fileLogger != nil {
+		_ = fileLogger.Close()
+		fileLogger = nil
+	}
+}
 
 func newRotatingDailyLogger(dir string, retentionDays int) (*rotatingDailyLogger, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -105,5 +158,14 @@ func (l *rotatingDailyLogger) pruneOldest() {
 		if t.Before(cutoff) {
 			_ = os.Remove(filepath.Join(l.dir, e.Name()))
 		}
+	}
+}
+
+func logFileLine(msg string) {
+	fileLoggerMu.RLock()
+	lg := fileLogger
+	fileLoggerMu.RUnlock()
+	if lg != nil {
+		lg.WriteLine(msg)
 	}
 }
